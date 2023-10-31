@@ -5,5 +5,3 @@ RUN pip install matplotlib
 RUN pip install numba
 
 RUN pip install einops
-
-RUN pip install slack_sdk

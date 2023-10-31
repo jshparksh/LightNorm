@@ -319,12 +319,13 @@ def unsqueeze_all(t):
     return t[None, :, None, None]
 
 class RangeBN(nn.Module):
-    def __init__(self, num_features, momentum=0.1, affine=True, num_chunks=8, eps=1e-5):
+    def __init__(self, num_features, dim=1, momentum=0.1, affine=True, num_chunks=8, eps=1e-5):
         super(RangeBN, self).__init__()
         self.register_buffer('running_mean', torch.zeros(num_features))
         self.register_buffer('running_var', torch.zeros(num_features))
 
         self.momentum = momentum
+        self.dim = dim
         if affine:
             self.bias = nn.Parameter(torch.Tensor(num_features))
             self.weight = nn.Parameter(torch.Tensor(num_features))
@@ -361,7 +362,7 @@ class RangeBN(nn.Module):
         """else:
             mean = self.running_mean
             scale = self.running_var"""
-
+            
         out = (x - mean.view(1, mean.size(0), 1, 1)) * \
             scale.view(1, scale.size(0), 1, 1)
         out = out * gamma_.view(1, gamma_.size(0), 1, 1) + self.bias.view(1, self.bias.size(0), 1, 1)
@@ -369,13 +370,14 @@ class RangeBN(nn.Module):
         return out
 
 class RangeBN_bfp(nn.Module):
-    def __init__(self, num_features, bfp_conf, momentum=0.1, affine=True, num_chunks=8, eps=1e-5):
+    def __init__(self, num_features, bfp_conf, dim=1, momentum=0.1, affine=True, num_chunks=8, eps=1e-5):
         super(RangeBN_bfp, self).__init__()
         self.register_buffer('running_mean', torch.zeros(num_features))
         self.register_buffer('running_var', torch.zeros(num_features))
 
         self.bfp_conf = bfp_conf
         self.momentum = momentum
+        self.dim = dim
         if affine:
             self.bias = nn.Parameter(torch.Tensor(num_features))
             self.weight = nn.Parameter(torch.Tensor(num_features))
@@ -622,434 +624,115 @@ class BFPRangeBatchNorm2d(torch.nn.Module):
             s += ', beta=True'
         return s.format(**self.__dict__)
 
-def origin_idx_calculator(idx, B, H, W, num_chunks):
-    origin_idx = []
-    if num_chunks < H*W//num_chunks:
-        for i in range(len(idx)):
-            for j in range(len(idx[0])):
-                origin_idx.append([(j*num_chunks*B+int(idx[i][j]))//(H*W), i, 
-                        ((j*num_chunks*B+int(idx[i][j]))%(H*W))//H, ((j*num_chunks*B+int(idx[i][j]))%(H*W))%H])
-    else:
-        for i in range(len(idx)):
-            for j in range(len(idx[0])):
-                origin_idx.append([(j*B*H*W//num_chunks+int(idx[i][j]))//(H*W), i,
-                        ((j*B*H*W//num_chunks+int(idx[i][j]))%(H*W))//H, ((j*B*H*W//num_chunks+int(idx[i][j]))%(H*W))%H])
-    return origin_idx
-
-# For quantization
-class SetPrecision(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input, dtype='bfloat16'):
-        ctx.dtype = dtype
-        if dtype == 'fp32':
-            return input.clone().detach()
-        #ctx.save_for_backward(input)
-        return set_precision(input.clone().detach(), dtype=dtype)
-    @staticmethod
-    def backward(ctx, grad_output):
-        #input = ctx.saved_variables
-        dtype = ctx.dtype
-        if dtype == 'fp32':
-            return grad_output, None
-        if '+' in dtype:
-            dtype = 'fp10_163+8'
-        else:
-            dtype = 'fp10_163' # 'bfloat16' #ctx.dtype
-        return set_precision(grad_output.clone().detach(), dtype=dtype), None
-
-class BFPSetPrecision(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input, dtype='bfloat16', bfp_conf=None):
-        ctx.dtype = dtype
-        ctx.bfp_conf = bfp_conf
-        if dtype == 'fp32':
-            return input.clone().detach()
-        ctx.save_for_backward(input)
-        return set_precision(input.clone().detach(), dtype=dtype)
-    @staticmethod
-    def backward(ctx, grad_output):
-        #input = ctx.saved_variables
-        dtype = ctx.dtype
-        bfp_conf = ctx.bfp_conf
-        if dtype == 'fp32':
-            #grad_output = make_groups_tensor(grad_output.clone().detach(), bfp_conf.bio_bit, bfp_conf.bio_dim)
-            return grad_output, None, None
-        dtype = 'bfloat16' # ctx.dtype
-        grad_output = set_precision(grad_output.clone().detach(), dtype=dtype)
-        #grad_output = make_groups_tensor(grad_output.clone().detach(), bfp_conf.bio_bit, bfp_conf.bio_dim)
-        return grad_output, None, None
-
-class MakeGroupsTensor(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input, bfp_conf=None, mode='fw'):
-        ctx.bfp_conf = bfp_conf
-        #ctx.save_for_backward(input)
-        if mode == 'fw':
-            bit = bfp_conf.fw_bit
-            dim = bfp_conf.fw_dim
-        elif mode == 'fi':
-            bit = bfp_conf.fi_bit
-            dim = bfp_conf.fi_dim
-        elif mode == 'fo':
-            bit = bfp_conf.fo_bit
-            dim = bfp_conf.fo_dim
-        elif mode == 'bwg':
-            bit = bfp_conf.bwg_bit
-            dim = bfp_conf.bwg_dim
-        elif mode == 'bio':
-            bit = bfp_conf.bio_bit
-            dim = bfp_conf.bio_dim
-        elif mode == 'big':
-            bit = bfp_conf.big_bit
-            dim = bfp_conf.big_dim
-        return make_groups_tensor(input.clone().detach(), bit, dim)
-        
-    @staticmethod
-    def backward(ctx, grad_output):
-        bfp_conf = ctx.bfp_conf
-        grad_output = make_groups_tensor(grad_output.clone().detach(), bfp_conf.bio_bit, bfp_conf.bio_dim)
-        return grad_output, None, None
-
-class minusmean(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input, mean):
-        return input - mean
-    @staticmethod
-    def backward(ctx, grad_output):
-        dL_davg = (grad_output * -1.0).sum(dim=(0, 2, 3), keepdim=True)
-        return grad_output, dL_davg
-
-class mulgammabeta(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input, gamma, beta):
-        ctx.save_for_backward(input, gamma, beta)
-        output = input*gamma+beta
-        return output
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        input, gamma, beta = ctx.saved_variables
-        dL_dxi = grad_output * gamma
-        dL_dgamma = (grad_output * input).sum(dim=(0, 2, 3), keepdim=True)
-        dL_dbeta = (grad_output).sum(dim=(0, 2, 3), keepdim=True)
-        
-        return dL_dxi, dL_dgamma, dL_dbeta
-
-# Act like wrapper
-class RangeBatchNorm2d_custom_fwd(torch.nn.Module):
-    def __init__(self, num_features, dtype='bfloat16', momentum=0.1, eps=1e-5, num_chunks=8):
-        super(RangeBatchNorm2d_custom_fwd, self).__init__()
-        self.num_features = num_features
-        self.momentum = momentum
-        self.dtype = dtype
-        self.num_chunks = num_chunks
-        self.weight = nn.Parameter(torch.Tensor(num_features))
-        self.beta = nn.Parameter(torch.Tensor(num_features))
-        
-        self.register_buffer('running_mean', torch.zeros(num_features))
-        self.register_buffer('running_var', torch.zeros(num_features))
-        self.reset_parameters()
-        self.eps = eps
-
-    def reset_parameters(self):
-        self.running_mean.zero_()
-        self.running_var.fill_(1)
-        self.weight.data.uniform_()
-        self.beta.data.zero_()
-
-    def _sum(self, input):
-        B, C, H, W = input.shape
-        y = input.transpose(0, 1).contiguous()  # C x B x H x W
-        y = y.view(C, self.num_chunks, B * H * W // self.num_chunks)
-        sum_max = y.max(-1)[0].view(C, -1).sum(-1)
-        sum_min = y.min(-1)[0].view(C, -1).sum(-1)
-        sum = y.view(C, -1).sum(-1)
-        return sum_max, sum_min, sum
-
-    def mmscale(self, sum_max, sum_min, sum, input_shape):
-        B, C, H, W = input_shape
-        n = B * H * W
-        mean_max = sum_max / self.num_chunks
-        mean_min = sum_min / self.num_chunks
-        mean = sum / n
-        scale_fix = 1 / ((2 * math.log(n//self.num_chunks)) ** 0.5)
-        scale = 1 / ((mean_max - mean_min) * scale_fix + self.eps)
-
-        return mean, scale
-
-    def forward(self, X):
-        dtype_nacc = self.dtype
-        if '+' in self.dtype:
-            dtype_nacc = self.dtype.split('+')[0]
-        input = SetPrecision.apply(X, dtype_nacc)
-        gamma = self.weight.view(1, self.num_features, 1, 1)
-        gamma = SetPrecision.apply(gamma, dtype_nacc)
-        beta = self.beta.view(1, self.num_features, 1, 1)
-        sum_max, sum_min, sum = self._sum(input)
-        sum_max = SetPrecision.apply(sum_max, self.dtype)
-        sum_min = SetPrecision.apply(sum_min, self.dtype)
-        sum = SetPrecision.apply(sum, self.dtype)
-        mean, scale = self.mmscale(sum_max, sum_min, sum, X.shape)
-        mean = SetPrecision.apply(mean, dtype_nacc)
-        scale = SetPrecision.apply(scale, dtype_nacc)
-        output = minusmean.apply(input, mean.view(1, -1, 1, 1))
-        output *= scale.view(1, scale.size(0), 1, 1)
-        output = SetPrecision.apply(output, dtype_nacc)
-        output = mulgammabeta.apply(output, gamma, beta)
-        output = SetPrecision.apply(output, dtype_nacc)
-        
-        return output
-
-    def extra_repr(self):
-        s = ('{num_features}')
-        s += ', {dtype}'
-        return s.format(**self.__dict__)
-
-# Act like wrapper
-class BFPRangeBatchNorm2d_custom_fwd(torch.nn.Module):
-    def __init__(self, num_features, dtype='fp8+8', bfp_conf=None, momentum=0.1, eps=1e-5, num_chunks=8):
-        super(BFPRangeBatchNorm2d_custom_fwd, self).__init__()
-        self.num_features = num_features
-        self.momentum = momentum
-        self.dtype = dtype
-        self.bfp_conf = bfp_conf
-        self.num_chunks = num_chunks
-        self.weight = nn.Parameter(torch.Tensor(num_features))
-        self.beta = nn.Parameter(torch.Tensor(num_features))
-        
-        self.register_buffer('running_mean', torch.zeros(num_features))
-        self.register_buffer('running_var', torch.zeros(num_features))
-        self.reset_parameters()
-        self.eps = eps
-
-    def reset_parameters(self):
-        self.running_mean.zero_()
-        self.running_var.fill_(1)
-        self.weight.data.uniform_()
-        self.beta.data.zero_()
-
-    def _sum(self, input):
-        B, C, H, W = input.shape
-        y = input.transpose(0, 1).contiguous()  # C x B x H x W
-        y = y.view(C, self.num_chunks, B * H * W // self.num_chunks)
-        sum_max = y.max(-1)[0].view(C, -1).sum(-1)
-        sum_min = y.min(-1)[0].view(C, -1).sum(-1)
-        sum = y.view(C, -1).sum(-1)
-        return sum_max, sum_min, sum
-
-    def mmscale(self, sum_max, sum_min, sum, input_shape):
-        B, C, H, W = input_shape
-        n = B * H * W
-        mean_max = sum_max / self.num_chunks
-        mean_min = sum_min / self.num_chunks
-        mean = sum / n
-        scale_fix = 1 / ((2 * math.log(n//self.num_chunks)) ** 0.5)
-        scale = 1 / ((mean_max - mean_min) * scale_fix + self.eps)
-
-        return mean, scale
-
-    def forward(self, X):
-        dtype_nacc = self.dtype
-        if '+' in self.dtype:
-            dtype_nacc = self.dtype.split('+')[0]
-        input = SetPrecision.apply(X, dtype_nacc)
-        input = MakeGroupsTensor.apply(input, self.bfp_conf, 'fi')
-        gamma = self.weight.view(1, self.num_features, 1, 1)
-        gamma = SetPrecision.apply(gamma, dtype_nacc)
-        gamma = MakeGroupsTensor.apply(gamma, self.bfp_conf, 'fw')
-        beta = self.beta.view(1, self.num_features, 1, 1)
-        sum_max, sum_min, sum = self._sum(input)
-        sum_max = SetPrecision.apply(sum_max, self.dtype)
-        sum_min = SetPrecision.apply(sum_min, self.dtype)
-        sum = SetPrecision.apply(sum, self.dtype)
-        mean, scale = self.mmscale(sum_max, sum_min, sum, X.shape)
-        mean = SetPrecision.apply(mean, dtype_nacc)
-        scale = SetPrecision.apply(scale, dtype_nacc)
-        output = minusmean.apply(input, mean.view(1, -1, 1, 1))
-        output *= scale.view(1, scale.size(0), 1, 1)
-        output = SetPrecision.apply(output, dtype_nacc)
-        output = mulgammabeta.apply(output, gamma, beta)
-        output = SetPrecision.apply(output, dtype_nacc)
-        output = MakeGroupsTensor.apply(output, self.bfp_conf, 'fo')
-        
-        return output
-
-    def extra_repr(self):
-        s = ('{num_features}')
-        s += ', {dtype}'
-        s += ', bfp_conf=({bfp_conf})'
-        return s.format(**self.__dict__)
-
 class RangeBatchNorm2dFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, X, gamma, beta, num_chunks=16, eps=1e-5, dtype='bfloat16'):    #input, weight, bias=None, bf_conf=None, stride=1, padding=0, dilation=1, groups=1):
+    def forward(ctx, input, gamma, beta, num_chunks=8, eps=1e-5, dtype='bfloat16'):    #input, weight, bias=None, bf_conf=None, stride=1, padding=0, dilation=1, groups=1):
         # print("= Forward:",input.shape, weight.shape, stride, padding, dilation, groups)
         # Grouping input and weight
         if dtype == 'bfloat16' or dtype == 'fp16' or dtype == 'fp16+4' or dtype == 'fp16+8' or dtype == 'fp8' or dtype == 'fp8+4' or dtype == 'fp8+8':
-            X = set_precision(X.clone().detach(), dtype)
-            gamma = set_precision(gamma.clone().detach(), dtype)
-            dtype_nacc = dtype
-            if '+' in dtype:
-                dtype_nacc = dtype.split('+')[0]
-            B, C, H, W = X.shape
-            y = X.transpose(0, 1).contiguous()  # C x B x H x W
-            y = y.view(C, num_chunks, B * H * W // num_chunks)
-            sum_max = y.max(-1)[0].sum(-1)
-            sum_max = set_precision(sum_max.clone().detach(), dtype)
-            sum_min = y.min(-1)[0].sum(-1)
-            sum_min = set_precision(sum_min.clone().detach(), dtype)
+            input = set_precision(input.clone().detach(), dtype)
+        B, C, H, W = input.shape
+        y = input.transpose(0, 1).contiguous()  # C x B x H x W
+        y = y.view(C, num_chunks, B * H * W // num_chunks)
+        avg_max = y.max(-1)[0].mean(-1)  # C
+        avg_min = y.min(-1)[0].mean(-1)  # C
+        avg = y.view(C, -1).mean(-1)  # C
+        if dtype == 'bfloat16' or dtype == 'fp16' or dtype == 'fp16+4' or dtype == 'fp16+8' or dtype == 'fp8' or dtype == 'fp8+4' or dtype == 'fp8+8':
+            avg_max = set_precision(avg_max.clone().detach(), dtype)
+            avg_min = set_precision(avg_min.clone().detach(), dtype)
+            avg = set_precision(avg.clone().detach(), dtype)
+        #scale_fix = (0.5 * 0.35) * (1 + (math.pi * math.log(4)) **
+        #                            0.5) / ((2 * math.log(y.size(-1))) ** 0.5)
+        scale_fix = 1 / ((2 * math.log(y.size(-1))) ** 0.5)
+        scale = 1 / ((avg_max - avg_min) * scale_fix + eps)  
+        if dtype == 'bfloat16' or dtype == 'fp16' or dtype == 'fp16+4' or dtype == 'fp16+8' or dtype == 'fp8' or dtype == 'fp8+4' or dtype == 'fp8+8':
+            scale = set_precision(scale.clone().detach(), dtype)
+        avg = avg.view(1, -1, 1, 1)
+        scale = scale.view(1, -1, 1, 1)
+        ctx.avg = avg
+        ctx.eps = eps
+        ctx.scale = scale
+        ctx.scale_fix = scale_fix
+        ctx.num_chunks = num_chunks
+        ctx.dtype = dtype
 
-            avg_max = sum_max / num_chunks
-            avg_max = set_precision(avg_max.clone().detach(), dtype_nacc)
-            avg_min = sum_min / num_chunks
-            avg_min = set_precision(avg_min.clone().detach(), dtype_nacc)
-            
-            max_index = origin_idx_calculator(y.max(-1)[1], B, H, W, num_chunks)
-            min_index = origin_idx_calculator(y.min(-1)[1], B, H, W, num_chunks)
-
-            sum = y.view(C, -1).sum(-1)
-            sum = set_precision(sum.clone().detach(), dtype)
-            n = y.view(C, -1).size()[1]
-            avg = sum / n
-            avg = set_precision(avg.clone().detach(), dtype_nacc)
-            
-            scale_fix = 1 / ((2 * math.log(y.size(-1))) ** 0.5)
-            scale = 1 / ((avg_max - avg_min) * scale_fix + eps)
-            scale = set_precision(scale.clone().detach(), dtype_nacc)
-
-            avg = avg.view(1, -1, 1, 1)
-            scale = scale.view(1, -1, 1, 1)
-
-            ctx.avg = avg
-            ctx.avg_max = avg_max
-            ctx.avg_min = avg_min
-            ctx.eps = eps
-            ctx.scale = scale
-            ctx.scale_fix = scale_fix
-            ctx.num_chunks = num_chunks
-            ctx.dtype = dtype
-            ctx.max_index = max_index
-            ctx.min_index = min_index
-
-            output = (X - avg) * scale
+        output = (input - avg) * scale
+        if dtype == 'bfloat16' or dtype == 'fp16' or dtype == 'fp16+4' or dtype == 'fp16+8' or dtype == 'fp8' or dtype == 'fp8+4' or dtype == 'fp8+8':
             output = set_precision(output.clone().detach(), dtype)
-            ctx.save_for_backward(X, gamma, beta, output, scale)
-            output = output * gamma + beta
+        ctx.save_for_backward(input, gamma, beta, output, scale)
+        output = output * gamma + beta
+        if dtype == 'bfloat16' or dtype == 'fp16' or dtype == 'fp16+4' or dtype == 'fp16+8' or dtype == 'fp8' or dtype == 'fp8+4' or dtype == 'fp8+8':
             output = set_precision(output.clone().detach(), dtype)
 
-        else:
-            B, C, H, W = X.shape
-            y = X.transpose(0, 1).contiguous()  # C x B x H x W
-            y = y.view(C, num_chunks, B * H * W // num_chunks)
-            avg_max = y.max(-1)[0].mean(-1)  # C
-            avg_min = y.min(-1)[0].mean(-1)  # C
-            avg = y.view(C, -1).mean(-1)  # C
-            max_index = origin_idx_calculator(y.max(-1)[1], B, H, W, num_chunks)
-            min_index = origin_idx_calculator(y.min(-1)[1], B, H, W, num_chunks)
-            scale_fix = 1 / ((2 * math.log(y.size(-1))) ** 0.5)
-            scale = 1 / ((avg_max - avg_min) * scale_fix + eps)  
+        #if bfp_conf.fo:
+        #    output = make_groups_tensor(output.clone().detach(), bfp_conf.fo_bit, bfp_conf.fo_dim, 2)
 
-            avg = avg.view(1, -1, 1, 1)
-            scale = scale.view(1, -1, 1, 1)
-
-            ctx.avg = avg
-            ctx.avg_max = avg_max
-            ctx.avg_min = avg_min
-            ctx.eps = eps
-            ctx.scale = scale
-            ctx.scale_fix = scale_fix
-            ctx.num_chunks = num_chunks
-            ctx.dtype = dtype
-            ctx.max_index = max_index
-            ctx.min_index = min_index
-
-            output = (X - avg) * scale
-            ctx.save_for_backward(X, gamma, beta, output, scale)
-            output = output * gamma + beta
-        
         return output
     
     @staticmethod
     def backward(ctx, grad_output):
         # Load saved tensors and configs
-        X, gamma, beta, output, scale = ctx.saved_variables
-        B, C, H, W = X.shape
+        input, gamma, beta, output, scale = ctx.saved_variables
+        B, C, H, W = input.shape
         avg = ctx.avg
-        avg_max = ctx.avg_max
-        avg_min = ctx.avg_min
         scale = ctx.scale
         eps = ctx.eps
         scale_fix = ctx.scale_fix 
         num_chunks = ctx.num_chunks
         dtype = ctx.dtype
-        max_index = ctx.max_index
-        min_index = ctx.min_index
-
         if dtype != 'fp32':
             dtype = 'bfloat16'
         if dtype == 'bfloat16' or dtype == 'fp16' or dtype == 'fp16+4' or dtype == 'fp16+8' or dtype == 'fp8' or dtype == 'fp8+4' or dtype == 'fp8+8':
             grad_output = set_precision(grad_output.clone().detach(), dtype)
-        #print('grad_output', grad_output)
-        dL_dxi_hat = grad_output * gamma
-        """
-        dL_dvar = dL_dxi_hat * (X - avg) * -0.5 * torch.sqrt(scale) * torch.sqrt(scale) * torch.sqrt(scale)
-        dL_dvar_tmp = torch.zeros(dL_dvar.size()).cuda()
-        for idx in max_index:
-            dL_dvar_tmp[idx[0], idx[1], idx[2], idx[3]] = dL_dvar[idx[0], idx[1], idx[2], idx[3]] #dL_dxi_max[idx[0], idx[1], idx[2], idx[3]] #
-        for idx in min_index:
-            dL_dvar_tmp[idx[0], idx[1], idx[2], idx[3]] = dL_dvar[idx[0], idx[1], idx[2], idx[3]]
-        dL_dvar = dL_dvar_tmp.sum(dim=(0, 2, 3), keepdim=True)
-        """
-        dL_dvar = (dL_dxi_hat * (X - avg) * -0.5 * torch.sqrt(scale) * torch.sqrt(scale) * torch.sqrt(scale)).sum(dim=(0, 2, 3), keepdim=True)
-        dL_dxmax_mean = (dL_dvar / scale_fix).sum(dim=(0, 2, 3), keepdim=True)
-        dL_dxmin_mean = (-1 * dL_dvar / scale_fix).sum(dim=(0, 2, 3), keepdim=True)
-        dL_dxmax = (dL_dxmax_mean / num_chunks).sum(dim=(0, 2, 3), keepdim=True)
-        dL_dxmin = (dL_dxmin_mean / num_chunks).sum(dim=(0, 2, 3), keepdim=True)
-        dL_davg = (dL_dxi_hat * -1.0 * scale).sum(dim=(0, 2, 3), keepdim=True)
-        dL_dxi = dL_davg / (B*H*W) + dL_dxi_hat * scale
-        for idx in max_index:
-            dL_dxi[idx[0], idx[1], idx[2], idx[3]] += grad_output[idx[0], idx[1], idx[2], idx[3]]
-        for idx in min_index:
-            dL_dxi[idx[0], idx[1], idx[2], idx[3]] -= grad_output[idx[0], idx[1], idx[2], idx[3]] #dL_dxmax[0, idx[1], 0, 0] #dL_dxi_max[idx[0], idx[1], idx[2], idx[3]] #
-        #dL_dxi_max = dL_dxi + dL_dxmax
-        #dL_dxi_min = dL_dxi + dL_dxmin
-        dL_dgamma = (grad_output * output).sum(dim=(0, 2, 3), keepdim=True)
-        dL_dbeta = (grad_output).sum(dim=(0, 2, 3), keepdim=True)
-        #for idx in max_index:
-        #    dL_dxi[idx[0], idx[1], idx[2], idx[3]] += dL_dxmax[0, idx[1], 0, 0] #dL_dxi_max[idx[0], idx[1], idx[2], idx[3]] #
-        #for idx in min_index:
-        #    dL_dxi[idx[0], idx[1], idx[2], idx[3]] += dL_dxmin[0, idx[1], 0, 0] #dL_dxi_min[idx[0], idx[1], idx[2], idx[3]] #
+        grad_input = (gamma / scale * scale) * (scale_fix - 1 / (num_chunks * B * H * W)) * grad_output
+
+        #dL_dxi_hat = grad_output * gamma
+        #dL_davg = (dL_dxi_hat * -1.0 * scale).sum(dim=(0, 2, 3), keepdim=True)
+        #grad_input = dL_dxi_hat * scale + dL_davg / B
+        grad_gamma = (grad_output * output).sum(dim=(0, 2, 3), keepdim=True)
+        grad_beta = (grad_output).sum(dim=(0, 2, 3), keepdim=True)
+
         if dtype == 'bfloat16' or dtype == 'fp16' or dtype == 'fp8' or dtype == 'fp8+4' or dtype == 'fp8+8':
-            dL_dxi = set_precision(dL_dxi.clone().detach(), dtype)
-            dL_dgamma = set_precision(dL_dgamma.clone().detach(), dtype)
-            dL_dbeta = set_precision(dL_dbeta.clone().detach(), dtype)
-        return dL_dxi, dL_dgamma, dL_dbeta, None, None, None
+            grad_input = set_precision(grad_input.clone().detach(), dtype)
+            grad_gamma = set_precision(grad_gamma.clone().detach(), dtype)
+            grad_beta = set_precision(grad_beta.clone().detach(), dtype)
+        return grad_input, grad_gamma, grad_beta, None, None, None
         
         
 # Blockfloat Batchnorm
 class RangeBatchNorm2d_custom(torch.nn.Module):
-    def __init__(self, num_features, dtype='bfloat16', eps=1e-5, momentum=0.1, num_chunks=8):
+    def __init__(self,
+                num_features: int,
+                dtype='bfloat16',
+                momentum = 0.1,
+                num_chunks = 8,
+                eps = 1e-5,
+                beta: bool = True):
         super(RangeBatchNorm2d_custom, self).__init__()
 
         self.num_features = num_features
         self.momentum = momentum
         self.dtype = dtype
         self.num_chunks = num_chunks
+        self.eps = eps
         self.weight = nn.Parameter(torch.Tensor(num_features))
-        self.beta = nn.Parameter(torch.Tensor(num_features))
-        
+        if beta:
+            self.beta = nn.Parameter(torch.Tensor(num_features))
+        else:
+            self.register_parameter('bias', None)
         self.register_buffer('running_mean', torch.zeros(num_features))
         self.register_buffer('running_var', torch.zeros(num_features))
         self.reset_parameters()
-        self.eps = eps
 
-    def reset_parameters(self):
+    def reset_parameters(self): # -> None:
+        # https://pytorch.org/docs/stable/nn.init.html#torch.nn.init.kaiming_uniform_
         self.running_mean.zero_()
         self.running_var.fill_(1)
         self.weight.data.uniform_()
         self.beta.data.zero_()
 
     def forward(self, input):
+        
         gamma = self.weight.view(1, self.num_features, 1, 1)
         beta = self.beta.view(1, self.num_features, 1, 1)
 
@@ -1057,7 +740,10 @@ class RangeBatchNorm2d_custom(torch.nn.Module):
 
     def extra_repr(self):
         s = ('{num_features}')
-        s += ', {dtype}'
+        if self.beta is None:
+            s += ', beta=False'
+        else:
+            s += ', beta=True'
         return s.format(**self.__dict__)
 
 def unsqueeze_all(t):
@@ -1066,34 +752,19 @@ def unsqueeze_all(t):
 
 class BFPBatchNorm2dFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, X, gamma, beta, bfp_conf, eps=1e-5):
+    def forward(ctx, X, gamma, beta, bfp_conf, eps=1e-3):
         # Don't save keepdim'd values for backward
-        fw_acc_bit = 10
-        dim_1d = bfp_conf.fi_dim[1]
-        dim_2d = bfp_conf.fi_dim[1]
         if bfp_conf.fi:
-            X_ = X
-            #X_ = make_groups_tensor(X.clone().detach(), bfp_conf.fi_bit, bfp_conf.fi_dim)
+            X_ = make_groups_tensor(X.clone().detach(), bfp_conf.fi_bit, bfp_conf.fi_dim, 0)
         else:
             X_ = X
         if bfp_conf.fw:
-            gamma_ = gamma #gamma_ = make_groups_tensor(gamma.clone().detach(), bfp_conf.fw_bit, bfp_conf.fw_dim)
+            gamma_ = make_groups_tensor(gamma.clone().detach(), bfp_conf.fw_bit, bfp_conf.fw_dim, 1)
         else:
             gamma_ = gamma
+
         B, C, H, W = X_.shape
         y = X_.transpose(0, 1).contiguous()  # C x B x H x W
-        sum = y.view(C, -1).sum(-1)
-        sum = make_groups_tensor(sum.clone().detach(), fw_acc_bit, dim_1d)#dtype)
-        n = y.view(C, -1).size()[1]
-        avg = sum / n
-        avg = make_groups_tensor(avg.clone().detach(), bfp_conf.fi_bit, dim_1d)#dtype_nacc)
-        var = (y.view(C, -1) - avg.view(C, -1)) ** 2
-        var = make_groups_tensor(var.clone().detach(), bfp_conf.fi_bit, bfp_conf.fi_dim)#dtype_nacc)
-        var = var.sum(-1)
-        var = make_groups_tensor(var.clone().detach(), fw_acc_bit, dim_1d)#dtype)
-        var = var / n
-        var = make_groups_tensor(var.clone().detach(), bfp_conf.fi_bit, dim_1d)#dtype_nacc)
-
         avg = y.view(C, -1).mean(-1)  # C
         var = y.view(C, -1).var(-1, unbiased=False)
         
@@ -1106,16 +777,14 @@ class BFPBatchNorm2dFunction(torch.autograd.Function):
         ctx.bfp_conf = bfp_conf
         output = X_ - avg #unsqueeze_all(avg)
         scale = 1 / torch.sqrt(var + eps)
-        #scale = make_groups_tensor(scale.clone().detach(), bfp_conf.fi_bit, bfp_conf.fi_dim)
         output *= scale
-        output_tmp = output
         if bfp_conf.fo:
-            output = make_groups_tensor(output.clone().detach(), bfp_conf.fo_bit, bfp_conf.fo_dim)
+            output = make_groups_tensor(output.clone().detach(), bfp_conf.fo_bit, bfp_conf.fo_dim, 2)
         ctx.save_for_backward(X_, gamma_, beta, output, scale)
         
         output = output * gamma + beta
-        #if bfp_conf.fo:
-        #    output = make_groups_tensor(output.clone().detach(), fw_acc_bit, bfp_conf.fo_dim)
+        if bfp_conf.fo:
+            output = make_groups_tensor(output.clone().detach(), bfp_conf.fo_bit, bfp_conf.fo_dim, 2)
         return output
 
     @staticmethod
@@ -1126,23 +795,32 @@ class BFPBatchNorm2dFunction(torch.autograd.Function):
         var = ctx.var
         eps = ctx.eps
         bfp_conf = ctx.bfp_conf
+
         if bfp_conf.bio:
-            grad_output_ = make_groups_tensor(grad_output.clone().detach(), bfp_conf.bio_bit, bfp_conf.bio_dim)
+            grad_output_ = make_groups_tensor(grad_output.clone().detach(), bfp_conf.bio_bit, bfp_conf.bio_dim, 10)
         else: # Apply original gradient if grad_output is not grouped
             grad_output_ = grad_output
 
-        dL_dxi_hat = grad_output_ * gamma
+        if bfp_conf.biw:
+            if (bfp_conf.biw_bit != bfp_conf.fw_bit or bfp_conf.biw_dim != bfp_conf.fw_dim):
+                gamma_ = make_groups_tensor(gamma.clone().detach(), bfp_conf.biw_bit, bfp_conf.biw_dim, 11)
+            else:
+                gamma_ = gamma
+        else:
+            gamma_ = gamma
+
+        dL_dxi_hat = grad_output_ * gamma_
         dL_dvar = (dL_dxi_hat * (X - avg) * -0.5 * scale * scale * scale).sum(dim=(0, 2, 3), keepdim=True)
-        dL_davg = (dL_dxi_hat * -1.0 * scale).sum(dim=(0, 2, 3), keepdim=True) + dL_dvar * (-2.0 * (X - avg)).sum(dim=(0, 2, 3), keepdim=True) / (B*H*W)
+        
+        dL_davg = (dL_dxi_hat * -1.0 * scale).sum(dim=(0, 2, 3), keepdim=True) + dL_dvar * (-2.0 * (X - avg)).sum(dim=(0, 2, 3), keepdim=True) / (B*H*W) 
         dL_dxi = dL_dxi_hat * scale + dL_dvar * 2.0 * (X - avg) / (B*H*W)  + dL_davg / (B*H*W)
-        dL_dgamma = (grad_output_ * output).sum(dim=(0, 2, 3), keepdim=True)
-        dL_dbeta = (grad_output_).sum(dim=(0, 2, 3), keepdim=True)
+        dL_dgamma = (grad_output * output).sum(dim=(0, 2, 3), keepdim=True)
+        dL_dbeta = (grad_output).sum(dim=(0, 2, 3), keepdim=True)
 
         if bfp_conf.big and dL_dxi != None:
-            dL_dxi = make_groups_tensor(dL_dxi.clone().detach(), bfp_conf.big_bit, bfp_conf.big_dim)
+            dL_dxi = make_groups_tensor(dL_dxi.clone().detach(), bfp_conf.big_bit,bfp_conf.big_dim, 12)
         if bfp_conf.bwg and dL_dgamma != None:
-            dL_dgamma = make_groups_tensor(dL_dgamma.clone().detach(), bfp_conf.bwg_bit, bfp_conf.bwg_dim)
-            dL_dbeta = make_groups_tensor(dL_dbeta.clone().detach(), bfp_conf.bwg_bit, bfp_conf.bwg_dim)
+            dL_dgamma = make_groups_tensor(dL_dgamma.clone().detach(), bfp_conf.bwg_bit, bfp_conf.bwg_dim, 22)
 
         return dL_dxi, dL_dgamma, dL_dbeta, None, None
 
@@ -1179,7 +857,7 @@ class BFPBatchNorm2d_custom(nn.Module):
 
 class BatchNorm2dFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, X, gamma, beta, eps=1e-5, dtype='fp8'):
+    def forward(ctx, X, gamma, beta, eps=1e-3, dtype='fp8'):
         # Don't save keepdim'd values for backward
         if dtype == 'bfloat16' or dtype == 'fp16' or dtype == 'fp16+4' or dtype == 'fp16+8' or dtype == 'fp8' or dtype == 'fp8+4' or dtype == 'fp8+8':
             X = set_precision(X.clone().detach(), dtype)
@@ -1190,7 +868,6 @@ class BatchNorm2dFunction(torch.autograd.Function):
             B, C, H, W = X.shape
             y = X.transpose(0, 1).contiguous()  # C x B x H x W
             sum = y.view(C, -1).sum(-1)
-            sum = set_precision(sum.clone().detach(), dtype)
             n = y.view(C, -1).size()[1]
             avg = sum / n
             avg = set_precision(avg.clone().detach(), dtype_nacc)
@@ -1210,13 +887,12 @@ class BatchNorm2dFunction(torch.autograd.Function):
             ctx.dtype = dtype
             output = X - avg #unsqueeze_all(avg)
             scale = 1 / torch.sqrt(var + eps)
-            scale = set_precision(scale.clone().detach(), dtype_nacc)
             output *= scale
             output = set_precision(output.clone().detach(), dtype_nacc)
             ctx.save_for_backward(X, gamma, beta, output, scale)
             
             output = output * gamma
-            output_tmp = set_precision(output.clone().detach(), dtype_nacc)
+            output = set_precision(output.clone().detach(), dtype_nacc)
             output += beta
             output = set_precision(output.clone().detach(), dtype)
         else:
@@ -1248,22 +924,68 @@ class BatchNorm2dFunction(torch.autograd.Function):
         var = ctx.var
         eps = ctx.eps
         dtype = ctx.dtype
-        #if dtype != 'fp32':
-        dtype = 'fp16'#'bfloat16'
-        dtype_nacc = 'fp16'#'bfloat16'
-        
+        dtype_nacc = dtype
+        if dtype != 'fp32':
+            dtype = 'bfloat16'
+        if '+' in dtype:
+            dtype_nacc = dtype.split('+')[0]
         if dtype == 'bfloat16' or dtype == 'fp16' or dtype == 'fp16+4' or dtype == 'fp16+8' or dtype == 'fp8' or dtype == 'fp8+4' or dtype == 'fp8+8':
+            dL_dxi_hat = grad_output * gamma
+            dL_dxi_hat = set_precision(dL_dxi_hat.clone().detach(), dtype_nacc)
+            dL_dvar = dL_dxi_hat * (X - avg) * -0.5 * scale * scale * scale
+            dL_dvar = set_precision(dL_dvar.clone().detach(), dtype_nacc)
+            dL_dvar = dL_dvar.sum(dim=(0, 2, 3), keepdim=True)
+            dL_dvar = set_precision(dL_dvar.clone().detach(), dtype)
+            dL_dvar_ori = (dL_dxi_hat * (X - avg) * -0.5 * scale * scale * scale).sum(dim=(0, 2, 3), keepdim=True)
+            #print('dL_dvar', dL_dvar - dL_dvar_ori)
+            a = set_precision((dL_dxi_hat * -1.0 * scale).clone().detach(), dtype_nacc)
+            a_tmp = set_precision((a.sum(dim=(0, 2, 3), keepdim=True)).clone().detach(), dtype)
+            print('a_tmp', a_tmp)
+            b = dL_dxi_hat * -1.0 * scale
+            b = b.sum(dim=(0, 2, 3), keepdim=True)
+            print('b', b)
+            #print(a_tmp - b)
+            dL_davg1 = set_precision(((set_precision((dL_dxi_hat * -1.0 * scale).clone().detach(), dtype_nacc)).sum(dim=(0, 2, 3), keepdim=True)).clone().detach(), dtype)
+            dL_davg1_ori = (dL_dxi_hat * -1.0 * scale).sum(dim=(0, 2, 3), keepdim=True)
+            #print('dL_davg1', dL_davg1 - dL_davg1_ori)
+            dL_davg2 = set_precision((dL_dvar * set_precision((-2.0 * (X - avg)).sum(dim=(0, 2, 3), keepdim=True).clone().detach(), dtype) / (B*H*W)).clone().detach(), dtype)
+            dL_davg = set_precision((dL_davg1 + dL_davg2).clone().detach(), dtype)
+            dL_davg_ori = (dL_dxi_hat * -1.0 * scale).sum(dim=(0, 2, 3), keepdim=True) + dL_dvar * (-2.0 * (X - avg)).sum(dim=(0, 2, 3), keepdim=True) / (B*H*W)
+
+            #print('dL_davg', dL_davg - dL_davg_ori)
+            dL_davg = set_precision(dL_davg.clone().detach(), dtype_nacc)
+            dL_dxi = dL_dxi_hat * scale + dL_dvar * 2.0 * (X - avg) / (B*H*W)  + dL_davg / (B*H*W)
+            dL_dgamma = (grad_output * output).sum(dim=(0, 2, 3), keepdim=True)
+            dL_dbeta = (grad_output).sum(dim=(0, 2, 3), keepdim=True)
+            if dtype == 'bfloat16' or dtype == 'fp16' or dtype == 'fp16+4' or dtype == 'fp16+8' or dtype == 'fp8' or dtype == 'fp8+4' or dtype == 'fp8+8':
+                dL_dxi = set_precision(dL_dxi.clone().detach(), dtype)
+                dL_dgamma = set_precision(dL_dgamma.clone().detach(), dtype)
+                dL_dbeta = set_precision(dL_dbeta.clone().detach(), dtype)
+        if dtype == 'bfloat16' or dtype == 'fp16' or dtype == 'fp16+4' or dtype == 'fp16+8' or dtype == 'fp8' or dtype == 'fp8+4' or dtype == 'fp8+8':
+            if '+' in dtype:
+                dtype_nacc = dtype.split('+')[0]
             grad_output = set_precision(grad_output.clone().detach(), dtype)
-        dL_dxi_hat = grad_output * gamma
-        dL_dvar = (dL_dxi_hat * (X - avg) * -0.5 * scale * scale * scale).sum(dim=(0, 2, 3), keepdim=True)
-        dL_davg = (dL_dxi_hat * -1.0 * scale).sum(dim=(0, 2, 3), keepdim=True) + dL_dvar * (-2.0 * (X - avg)).sum(dim=(0, 2, 3), keepdim=True) / (B*H*W)
-        dL_dxi = dL_dxi_hat * scale + dL_dvar * 2.0 * (X - avg) / (B*H*W)  + dL_davg / (B*H*W)
-        dL_dgamma = (grad_output * output).sum(dim=(0, 2, 3), keepdim=True)
-        dL_dbeta = (grad_output).sum(dim=(0, 2, 3), keepdim=True)
-        if dtype == 'bfloat16' or dtype == 'fp16' or dtype == 'fp8' or dtype == 'fp8+4' or dtype == 'fp8+8':
-            dL_dxi = set_precision(dL_dxi.clone().detach(), dtype_nacc)
-            dL_dgamma = set_precision(dL_dgamma.clone().detach(), dtype_nacc)
-            dL_dbeta = set_precision(dL_dbeta.clone().detach(), dtype_nacc)
+        if '+' in dtype:
+            dL_dxi_hat = grad_output * gamma
+            if dtype == 'bfloat16' or dtype == 'fp16' or dtype == 'fp16+4' or dtype == 'fp16+8' or dtype == 'fp8' or dtype == 'fp8+4' or dtype == 'fp8+8':
+                dL_dxi_hat = set_precision(dL_dxi_hat.clone().detach(), dtype)
+        else:
+            dL_dxi_hat = grad_output * gamma
+            if dtype == 'bfloat16' or dtype == 'fp16' or dtype == 'fp16+4' or dtype == 'fp16+8' or dtype == 'fp8' or dtype == 'fp8+4' or dtype == 'fp8+8':
+                dL_dxi_hat = set_precision(dL_dxi_hat.clone().detach(), dtype)
+            dL_dvar = (dL_dxi_hat * (X - avg) * -0.5 * scale * scale * scale).sum(dim=(0, 2, 3), keepdim=True)
+            if dtype == 'bfloat16' or dtype == 'fp16' or dtype == 'fp16+4' or dtype == 'fp16+8' or dtype == 'fp8' or dtype == 'fp8+4' or dtype == 'fp8+8':
+                dL_dvar = set_precision(dL_dvar.clone().detach(), dtype)
+            dL_davg = (dL_dxi_hat * -1.0 * scale).sum(dim=(0, 2, 3), keepdim=True) + dL_dvar * (-2.0 * (X - avg)).sum(dim=(0, 2, 3), keepdim=True) / (B*H*W)
+            if dtype == 'bfloat16' or dtype == 'fp16' or dtype == 'fp16+4' or dtype == 'fp16+8' or dtype == 'fp8' or dtype == 'fp8+4' or dtype == 'fp8+8':
+                dL_davg = set_precision(dL_davg.clone().detach(), dtype)
+            dL_dxi = dL_dxi_hat * scale + dL_dvar * 2.0 * (X - avg) / (B*H*W)  + dL_davg / (B*H*W)
+            dL_dgamma = (grad_output * output).sum(dim=(0, 2, 3), keepdim=True)
+            dL_dbeta = (grad_output).sum(dim=(0, 2, 3), keepdim=True)
+            if dtype == 'bfloat16' or dtype == 'fp16' or dtype == 'fp16+4' or dtype == 'fp16+8' or dtype == 'fp8' or dtype == 'fp8+4' or dtype == 'fp8+8':
+                dL_dxi = set_precision(dL_dxi.clone().detach(), dtype)
+                dL_dgamma = set_precision(dL_dgamma.clone().detach(), dtype)
+                dL_dbeta = set_precision(dL_dbeta.clone().detach(), dtype)
         return dL_dxi, dL_dgamma, dL_dbeta, None, None
 
 class BatchNorm2d_custom(nn.Module):

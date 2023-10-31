@@ -651,10 +651,7 @@ class SetPrecision(torch.autograd.Function):
         dtype = ctx.dtype
         if dtype == 'fp32':
             return grad_output, None
-        if '+' in dtype:
-            dtype = 'fp10_163+8'
-        else:
-            dtype = 'fp10_163' # 'bfloat16' #ctx.dtype
+        dtype = 'bfloat16' # ctx.dtype
         return set_precision(grad_output.clone().detach(), dtype=dtype), None
 
 class BFPSetPrecision(torch.autograd.Function):
@@ -664,7 +661,7 @@ class BFPSetPrecision(torch.autograd.Function):
         ctx.bfp_conf = bfp_conf
         if dtype == 'fp32':
             return input.clone().detach()
-        ctx.save_for_backward(input)
+        #ctx.save_for_backward(input)
         return set_precision(input.clone().detach(), dtype=dtype)
     @staticmethod
     def backward(ctx, grad_output):
@@ -672,43 +669,10 @@ class BFPSetPrecision(torch.autograd.Function):
         dtype = ctx.dtype
         bfp_conf = ctx.bfp_conf
         if dtype == 'fp32':
-            #grad_output = make_groups_tensor(grad_output.clone().detach(), bfp_conf.bio_bit, bfp_conf.bio_dim)
-            return grad_output, None, None
+            return grad_output, None
         dtype = 'bfloat16' # ctx.dtype
-        grad_output = set_precision(grad_output.clone().detach(), dtype=dtype)
-        #grad_output = make_groups_tensor(grad_output.clone().detach(), bfp_conf.bio_bit, bfp_conf.bio_dim)
-        return grad_output, None, None
-
-class MakeGroupsTensor(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input, bfp_conf=None, mode='fw'):
-        ctx.bfp_conf = bfp_conf
-        #ctx.save_for_backward(input)
-        if mode == 'fw':
-            bit = bfp_conf.fw_bit
-            dim = bfp_conf.fw_dim
-        elif mode == 'fi':
-            bit = bfp_conf.fi_bit
-            dim = bfp_conf.fi_dim
-        elif mode == 'fo':
-            bit = bfp_conf.fo_bit
-            dim = bfp_conf.fo_dim
-        elif mode == 'bwg':
-            bit = bfp_conf.bwg_bit
-            dim = bfp_conf.bwg_dim
-        elif mode == 'bio':
-            bit = bfp_conf.bio_bit
-            dim = bfp_conf.bio_dim
-        elif mode == 'big':
-            bit = bfp_conf.big_bit
-            dim = bfp_conf.big_dim
-        return make_groups_tensor(input.clone().detach(), bit, dim)
-        
-    @staticmethod
-    def backward(ctx, grad_output):
-        bfp_conf = ctx.bfp_conf
         grad_output = make_groups_tensor(grad_output.clone().detach(), bfp_conf.bio_bit, bfp_conf.bio_dim)
-        return grad_output, None, None
+        return set_precision(grad_output.clone().detach(), dtype=dtype), None
 
 class minusmean(torch.autograd.Function):
     @staticmethod
@@ -852,25 +816,28 @@ class BFPRangeBatchNorm2d_custom_fwd(torch.nn.Module):
         dtype_nacc = self.dtype
         if '+' in self.dtype:
             dtype_nacc = self.dtype.split('+')[0]
-        input = SetPrecision.apply(X, dtype_nacc)
-        input = MakeGroupsTensor.apply(input, self.bfp_conf, 'fi')
+        input = BFPSetPrecision.apply(X, dtype_nacc, self.bfp_conf)
+        input = make_groups_tensor(input.clone().detach(), self.bfp_conf.fi_bit, self.bfp_conf.fi_dim)
         gamma = self.weight.view(1, self.num_features, 1, 1)
-        gamma = SetPrecision.apply(gamma, dtype_nacc)
-        gamma = MakeGroupsTensor.apply(gamma, self.bfp_conf, 'fw')
+        gamma = BFPSetPrecision.apply(gamma, dtype_nacc, self.bfp_conf)
+        gamma = make_groups_tensor(gamma.clone().detach(), self.bfp_conf.fw_bit, self.bfp_conf.fw_dim)
         beta = self.beta.view(1, self.num_features, 1, 1)
         sum_max, sum_min, sum = self._sum(input)
-        sum_max = SetPrecision.apply(sum_max, self.dtype)
-        sum_min = SetPrecision.apply(sum_min, self.dtype)
-        sum = SetPrecision.apply(sum, self.dtype)
+        sum_max = BFPSetPrecision.apply(sum_max, self.dtype, self.bfp_conf)
+        sum_min = BFPSetPrecision.apply(sum_min, self.dtype, self.bfp_conf)
+        sum = BFPSetPrecision.apply(sum, self.dtype, self.bfp_conf)
+        sum_max = make_groups_tensor(sum_max.clone().detach(), self.bfp_conf.fi_bit+8, self.bfp_conf.fi_dim)
+        sum_min = make_groups_tensor(sum_min.clone().detach(), self.bfp_conf.fi_bit+8, self.bfp_conf.fi_dim)
+        sum = make_groups_tensor(sum.clone().detach(), self.bfp_conf.fi_bit+8, self.bfp_conf.fi_dim)
         mean, scale = self.mmscale(sum_max, sum_min, sum, X.shape)
-        mean = SetPrecision.apply(mean, dtype_nacc)
-        scale = SetPrecision.apply(scale, dtype_nacc)
+        mean = BFPSetPrecision.apply(mean, dtype_nacc, self.bfp_conf)
+        scale = BFPSetPrecision.apply(scale, dtype_nacc, self.bfp_conf)
         output = minusmean.apply(input, mean.view(1, -1, 1, 1))
         output *= scale.view(1, scale.size(0), 1, 1)
-        output = SetPrecision.apply(output, dtype_nacc)
+        output = BFPSetPrecision.apply(output, dtype_nacc, self.bfp_conf)
         output = mulgammabeta.apply(output, gamma, beta)
-        output = SetPrecision.apply(output, dtype_nacc)
-        output = MakeGroupsTensor.apply(output, self.bfp_conf, 'fo')
+        output = BFPSetPrecision.apply(output, dtype_nacc, self.bfp_conf)
+        output = make_groups_tensor(output.clone().detach(), self.bfp_conf.fo_bit, self.bfp_conf.fo_dim)
         
         return output
 
@@ -1248,9 +1215,9 @@ class BatchNorm2dFunction(torch.autograd.Function):
         var = ctx.var
         eps = ctx.eps
         dtype = ctx.dtype
-        #if dtype != 'fp32':
-        dtype = 'fp16'#'bfloat16'
-        dtype_nacc = 'fp16'#'bfloat16'
+        if dtype != 'fp32':
+            dtype = 'bfloat16'
+            dtype_nacc = 'bfloat16+4'
         
         if dtype == 'bfloat16' or dtype == 'fp16' or dtype == 'fp16+4' or dtype == 'fp16+8' or dtype == 'fp8' or dtype == 'fp8+4' or dtype == 'fp8+8':
             grad_output = set_precision(grad_output.clone().detach(), dtype)

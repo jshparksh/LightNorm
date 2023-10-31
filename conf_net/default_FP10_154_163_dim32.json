@@ -1,0 +1,18 @@
+{
+    "name":"default",
+    "default":{
+        "fw_bit":5,
+        "bio_bit":4,
+        "big_bit":4,
+        "bwg_bit":4,
+        "fw_dim":[1,32,1,1],
+        "fi_dim":[1,32,1,1],
+        "fo_dim":[1,32,1,1],
+        "bio_dim":[1,32,1,1],
+        "big_dim":[1,32,1,1],
+        "bwg_dim":[1,32,1,1],
+        "fo":true,
+        "big":true,
+        "bwg":true
+    }
+}

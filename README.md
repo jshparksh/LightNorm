@@ -1,9 +1,9 @@
 
 
 
-# FlexBlock
+# LightNorm
 
-This repository contains source code execution of the FlexBlock's simulation.
+This repository contains source code execution of the LightNorm's simulation.
 
 
 # Features
@@ -18,8 +18,7 @@ This repository features...
 ## Setup with docker (Recommended)
 
 1. Install [Docker](https://docs.docker.com/engine/install/) on the targeted machine.
-2. Clone this repository with `git clone https://github.com/r3coder/FlexBlock`
-3. Make a docker container as: `docker build . -t $(whoami)/flexblock:latest`
+2. Make a docker container as: `docker build . -t $(whoami)/lightnorm:latest`
 
 ## Setup without docker
 1. Clone this repository
@@ -34,11 +33,11 @@ This repository features...
 
 ## Resnet with preset config
 
-For the simple execution of the ResNet18 with the FlexBlock12 data structure, execute
+For the simple execution of the FP10_154 with the LightNorm data structure, execute
 
-```docker run --rm --gpus '"device=0"' --cpus="4" --user "$(id -u):$(id -g)" --workdir /app -v "$(pwd)":/app floatblock:latest python3 -u /app/main.py --mode train --model ResNet18 -bf ResNet18_FB12```
-
-It takes quite time to show the result (30min / epoch), so please be patient.
+```docker run --rm --gpus '"device=0"' --cpus="4" --user "$(id -u):$(id -g)" --workdir /app -v "$(pwd)":/app lightnorm:latest python3 -u /app/main.py --mode train --model ResNet18 -bf ResNet18_FB12```
+or
+```./docker_run $(whoami)/lightnorm:latest 0 main.py --mode train --model ResNet18 --dtype fp10_154 --dataset CIFAR100 --save-name save_test --bfp default_FP10_154_bfloat_dim32```
 
 ## More information
 

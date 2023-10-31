@@ -12,7 +12,7 @@ import os
 import json
 
 from bfp.conf import BFPConf
-from bfp.module import BFPLinear, BFPConv2d, BFPRangeBatchNorm2d, RangeBatchNorm2d_custom, RangeBatchNorm2d_custom_fwd, BFPRangeBatchNorm2d_custom_fwd, BatchNorm2d_custom, BFPBatchNorm2d_custom, RangeBN
+from bfp.module import BFPLinear, BFPConv2d, BFPRangeBatchNorm2d, RangeBatchNorm2d_custom, RangeBatchNorm2d_custom_fwd, BatchNorm2d_custom, BFPBatchNorm2d_custom, RangeBN
 
 # If you are migrating this code to separate library, plase remove line with "Log.Print" and next line
 from utils.logger import Log
@@ -73,10 +73,6 @@ def ReturnRangeBatchNorm2d_fwd(ta, dtype):
     #return RangeBN(ta.num_features, bfp_conf=bfpc, momentum=ta.momentum, eps=ta.eps)
     return RangeBatchNorm2d_custom_fwd(ta.num_features, dtype, momentum=ta.momentum, eps=ta.eps)
 
-def ReturnBFPRangeBatchNorm2d_fwd(ta, dtype, bfpc):
-    #return RangeBN(ta.num_features, bfp_conf=bfpc, momentum=ta.momentum, eps=ta.eps)
-    return BFPRangeBatchNorm2d_custom_fwd(ta.num_features, dtype, bfpc, momentum=ta.momentum, eps=ta.eps)
-
 def ReturnBFPBatchNorm2d(ta, bfpc):
     return BFPBatchNorm2d_custom(ta.num_features, bfp_conf=bfpc, momentum=ta.momentum, eps=ta.eps)
  
@@ -97,32 +93,28 @@ def _ReplaceInternal(net, name, attr_str, attr_value, bfpc, dtype, mode):
             else:
                 raise ValueError("Replace Method is not supported.")
             Log.Print("  => Replaced to BFPConv2d:%s"%(str(bfpc)), current=False, elapsed=False)"""
-    
     if type(attr_value) == torch.nn.BatchNorm2d:
         Log.Print("Detected %s : %s"%(name+"."+attr_str, attr_value), current=False, elapsed=False)
-        if bfpc == None:
+        """if bfpc == None:
             Log.Print("  == Didn't replaced", current=False, elapsed=False)
+        else:"""
+        if mode == "C":
+            #setattr(net, attr_str, ReturnBFPRangeBatchNorm2d(attr_value, bfpc))
+            #setattr(net, attr_str, ReturnRangeBatchNorm2d(attr_value, bfpc))
+            setattr(net, attr_str, ReturnBatchNorm2d(attr_value, dtype))
+            #setattr(net, attr_str, ReturnRangeBatchNorm2d(attr_value, bfpc))
+        elif mode == "S":
+            #net[int(attr_str)] = ReturnBFPRangeBatchNorm2d(net[int(attr_str)], bfpc)
+            #net[int(attr_str)] = ReturnBatchNorm2d(net[int(attr_str)], bfpc)
+            net[int(attr_str)] = ReturnBatchNorm2d(net[int(attr_str)], dtype)
+            #net[int(attr_str)] = ReturnRangeBatchNorm2d(net[int(attr_str)], bfpc)
         else:
-            if mode == "C":
-                #setattr(net, attr_str, ReturnBFPRangeBatchNorm2d(attr_value, bfpc))
-                #setattr(net, attr_str, ReturnRangeBatchNorm2d(attr_value, bfpc))
-                #setattr(net, attr_str, ReturnBatchNorm2d(attr_value, dtype))
-                #setattr(net, attr_str, ReturnRangeBatchNorm2d_fwd(attr_value, dtype))
-                setattr(net, attr_str, ReturnBFPRangeBatchNorm2d_fwd(attr_value, dtype, bfpc))
-            elif mode == "S":
-                #net[int(attr_str)] = ReturnBFPRangeBatchNorm2d(net[int(attr_str)], bfpc)
-                #net[int(attr_str)] = ReturnBatchNorm2d(net[int(attr_str)], bfpc)
-                #net[int(attr_str)] = ReturnBatchNorm2d(net[int(attr_str)], dtype)
-                #net[int(attr_str)] = ReturnRangeBatchNorm2d_fwd(net[int(attr_str)], dtype)
-                net[int(attr_str)] = ReturnBFPRangeBatchNorm2d_fwd(net[int(attr_str)], dtype, bfpc)
-            else:
-                raise ValueError("Replace Method is not supported.")
-            #Log.Print("  => Replaced to BFPRangeBatchNorm2d:%s"%(str(bfpc)), current=False, elapsed=False)
-            #Log.Print("  => Replaced to BatchNorm2d:%s"%(dtype), current=False, elapsed=False)
-            #Log.Print("  => Replaced to RangeBatchNorm2d_fwd:%s"%(dtype), current=False, elapsed=False)
-            Log.Print("  => Replaced to BFPRangeBatchNorm2d:%s"%(str(bfpc)), current=False, elapsed=False) 
-
-    if type(attr_value) == torch.nn.Linear: # Linear is replaced
+            raise ValueError("Replace Method is not supported.")
+        #Log.Print("  => Replaced to BFPRangeBatchNorm2d:%s"%(str(bfpc)), current=False, elapsed=False)
+        Log.Print("  => Replaced to BatchNorm2d:%s"%(dtype), current=False, elapsed=False)
+        #Log.Print("  => Replaced to RangeBatchNorm2d:%s"%(str(bfpc)), current=False, elapsed=False)
+        
+    elif type(attr_value) == torch.nn.Linear: # Linear is replaced
         return
         # TODO : Fix here 
         Log.Print("Detected %s : %s"%(name+"."+attr_str, attr_value), current=False, elapsed=False)

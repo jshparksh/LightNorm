@@ -5,9 +5,10 @@ import torch
 
 # Load models
 from model.AlexNet import AlexNetCifar
-from model.ResNet import ResNet18Cifar
+from model.ResNet import ResNet18Cifar, ResNet50Cifar
 from model.DenseNet import DenseNet121Cifar
 from model.MobileNetv1 import MobileNetv1Cifar
+from model.MobileNetv2 import MobileNetV2ImageNet, MobileNetv2Cifar
 from model.VGG import VGG16Cifar
 
 from model.MLPMixer import mlp_mixer_b16
@@ -19,8 +20,12 @@ model_names = sorted(name for name in models.__dict__
 
 from bfp.functions import ReplaceLayers
 
-def GetNetwork(dataset, model, num_classes = 10, bfp_conf = None, pretrained = False):
+def GetNetwork(dataset, model, num_classes = 10, bfp_conf = None, dtype = "fp32", pretrained = False):
     if dataset.lower() == "imagenet":
+        if model.lower() == 'mobilenetv2':
+            net = MobileNetV2ImageNet(num_classes)
+        if model.lower() == 'mobilenetv1':
+            net = MobileNetV2ImageNet(num_classes)
         if model.lower() in model_names:
             if pretrained:
                 net = models.__dict__[args.arch](pretrained=True)
@@ -35,10 +40,14 @@ def GetNetwork(dataset, model, num_classes = 10, bfp_conf = None, pretrained = F
             net = AlexNetCifar(num_classes)
         elif model.lower() == "resnet18":
             net = ResNet18Cifar(num_classes)
+        elif model.lower() == "resnet50":
+            net = ResNet50Cifar(num_classes)
         elif model.lower() == "densenet121":
             net = DenseNet121Cifar(num_classes)
         elif model.lower() == "mobilenetv1":
             net = MobileNetv1Cifar(num_classes)
+        elif model.lower() == 'mobilenetv2':
+            net = MobileNetv2Cifar(num_classes)
         elif model.lower() == "vgg16":
             net = VGG16Cifar(num_classes)
         else:
@@ -47,7 +56,7 @@ def GetNetwork(dataset, model, num_classes = 10, bfp_conf = None, pretrained = F
         NotImplementedError("Dataset {datset} not supported.")
 
     if bfp_conf != None:
-        ReplaceLayers(net, bfp_conf)
+        ReplaceLayers(net, bfp_conf, dtype)
         Log.Print("Replacing model's layers to provided bfp config...", current=False, elapsed=False)
     return net
 
@@ -79,12 +88,14 @@ def GetOptimizer(args, epoch):
 
 # Scheduler also uses same dict with optimizer
 def GetScheduler(args, epoch):
+    MILESTONES = [60, 120, 160]
     if str(epoch) in args.optimizer_dict:
         Log.Print("Setting scheduler from dict", elapsed=False, current=False)
         config = args.optimizer_dict[str(epoch)]
     else:
         Log.Print("Configuration not found. Returning default Scheduler from args...", elapsed=False, current=False)
-        
+    
+    #sche = optim.lr_scheduler.MultiStepLR(args.optimizer, milestones=MILESTONES, gamma=0.2)
     sche = optim.lr_scheduler.CosineAnnealingLR(args.optimizer, T_max=args.training_epochs)
         
     if str(epoch) in args.optimizer_dict:

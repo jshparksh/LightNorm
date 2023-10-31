@@ -15,11 +15,15 @@ from train.dataset import LoadDataset
 from train.network import GetNetwork, GetOptimizer, GetScheduler
 from train.train import TrainNetwork
 from bfp.functions import LoadBFPDictFromFile
+from torchsummary import summary
+#from torch.utils.tensorboard import SummaryWriter
 
 import os
 import json
 import argparse
 from datetime import datetime
+import wandb
+
 args = None
 
 
@@ -46,29 +50,33 @@ def ArgumentParse():
     # tag:Save
     parser.add_argument("--save-name", type=str, default = str(datetime.now())[:-7].replace("-","").replace(":","").replace(" ","_"),
         help = "Name of the saved log file, stat object, save checkpoint")
+    parser.add_argument("--pickle-path", type=str, default = "./_pickles",
+        help = "Set location to save pickle file")
     parser.add_argument("--log", type=str2bool, default = True,
         help = "Set true to save log file")
-    parser.add_argument("--slackbot", type=str2bool, default = True,
-        help = "Set true to send message to slackbot")
+    """parser.add_argument("--slackbot", type=str2bool, default = True,
+        help = "Set true to send message to slackbot")"""
     parser.add_argument("--stat", type=str2bool, default = False,
         help = "Record to stat object?")
     parser.add_argument("--save", type=str2bool, default = False,
         help = "Set true to save checkpoints")
     parser.add_argument("--save-interval", type=int, default = 0,
         help = "Checkpoint save interval. 0:only last, rest:interval")
+    parser.add_argument("--dtype", type=str, default="FP32",
+        help = "Data precision to uss [FP32, FP16, FP16+4, FP16+8, FP8, FP8+4, FP8+8, BFLOAT16")
     
     
     # tag:Dataset
-    parser.add_argument("-d","--dataset", type=str, default = "CIFAR10",
+    parser.add_argument("-d","--dataset", type=str, default = "CIFAR100",
         help = "Dataset to use [CIFAR10, CIFAR100, ImageNet]")
     parser.add_argument("-dp","--dataset-path", type=str, default = "./data",
         help = "Provide if dataset is prepared, escpecially for ImageNet. Dataset will automatically downloaded on CIFAR-10 and CIFAR-100")
     parser.add_argument("--dataset-pin-memory", type=str2bool, default = True,
         help = "Setting this option will pin dataset to memory, which may boost execution speed.")
-    parser.add_argument("--num-workers", type=int, default = 4,
+    parser.add_argument("--num-workers", type=int, default = 0,
         help = "Recommended value : 4")
-    parser.add_argument("--batch-size-train", type=int, default = 128,
-        help = ".")
+    parser.add_argument("--batch-size-train", type=int, default = 256, 
+        help = ".") #128
     parser.add_argument("--batch-size-test", type=int, default = 100,
         help = ".")
 
@@ -83,7 +91,7 @@ def ArgumentParse():
         help = ".")
     parser.add_argument("--start-epoch", type=int, default = 0,
         help = ".")
-    parser.add_argument("--optim-lr", type=float, default = 0.1,
+    parser.add_argument("--optim-lr", type=float, default = 0.01,
         help = "Optimizer learning rate")
     parser.add_argument("--optim-momentum", type=float, default = 0.9,
         help = "Optimizer momentum")
@@ -128,7 +136,7 @@ def ArgumentParse():
     SetArgsFromConf(args, "log")
     SetArgsFromConf(args, "stat")
     SetArgsFromConf(args, "save")
-    SetArgsFromConf(args, "slackbot")
+    """SetArgsFromConf(args, "slackbot")"""
     SetArgsFromConf(args, "save-interval")
 
     # Additional handlers
@@ -144,8 +152,8 @@ def ArgumentParse():
     # Set the log file
     Log.SetLogFile(True, args.log_location) if args.log else Log.SetLogFile(False)
     # args.stat = statManager() if args.stat else None
-    slackBot.Enable() if args.slackbot else slackBot.Disable()
-    slackBot.SetProcessInfo(args.save_name)
+    """slackBot.Enable() if args.slackbot else slackBot.Disable()
+    slackBot.SetProcessInfo(args.save_name)"""
     
     # tag:Dataset
     SetArgsFromConf(args, "dataset")
@@ -174,20 +182,20 @@ def ArgumentParse():
     SetArgsFromConf(args, "bfp-layer-conf-dict")
     if args.bfp_layer_conf_file != "":
         Log.Print("bfp-layer-conf-file is set.", elapsed=False, current=False)
-        args.net = GetNetwork(args.dataset, args.model, args.num_classes, LoadBFPDictFromFile(args.bfp_layer_conf_file))
+        args.net = GetNetwork(args.dataset, args.model, args.num_classes, LoadBFPDictFromFile(args.bfp_layer_conf_file), args.dtype)
     elif str(args.start_epoch) not in args.bfp_layer_conf_dict:
         Log.Print('bfp-layer-conf-file or bfp-layer-conf-dict is not set. Or, "{args.start_epoch}" is not provided on bfp-layer-conf-dict. Naive network will trained.', elapsed=False, current=False)
-        args.net = GetNetwork(args.dataset, args.model, args.num_classes, dict())
+        args.net = GetNetwork(args.dataset, args.model, args.num_classes, dict(), args.dtype)
     else:
         Log.Print("bfp-layer-conf-dict is set.", elapsed=False, current=False)
         Log.Print(str(args.bfp_layer_conf_dict))
-        args.net = GetNetwork(args.dataset, args.model, args.num_classes, LoadBFPDictFromFile(args.bfp_layer_conf_dict[str(args.start_epoch)]))
+        args.net = GetNetwork(args.dataset, args.model, args.num_classes, LoadBFPDictFromFile(args.bfp_layer_conf_dict[str(args.start_epoch)]), args.dtype)
 
 
     # Critertion, optimizer, scheduler
     args.criterion = nn.CrossEntropyLoss()
-
     args.optimizer_dict = dict()
+    #args.writer = SummaryWriter('runs/'+args.run_dir) 
     SetArgsFromConf(args, "optimizer-dict")
     
     # Optimizer and scheduler
@@ -205,12 +213,18 @@ def ArgumentParse():
         args.net.to('cuda')
     # TODO : Support Distributed DataParallel
 
+    # Write Tensorboard model
+    #dataiter = iter(args.trainloader)
+    #images, _ = dataiter.next()
+    #args.writer.add_graph(args.net, images.cuda())
+    #args.writer.close()
+    
     return args
 
 if __name__ == '__main__':
     # Parse Arguments and prepare almost everything
     args = ArgumentParse()
-
+    #summary(args.net, (3, 32, 32))
     Log.Print("Program executed on {} mode.".format(args.mode), current=False, elapsed=False)
     if args.mode == "train":
         # Network training mode
@@ -219,13 +233,14 @@ if __name__ == '__main__':
                 continue
             Log.Print(str(arg) + " : " + str(getattr(args, arg)), current=False, elapsed=False)
         # Setup Slackbot
-        text_file = open("./slackbot.token", "r")
+        """text_file = open("./slackbot.token", "r")
         data = text_file.read()
         text_file.close()
         slackBot.SetToken(data)
-        slackBot.SendStartSignal()
+        slackBot.SendStartSignal()"""
         try:
             # Train the Network
+
             TrainNetwork(args)
         except KeyboardInterrupt:
             Log.Print("Quit from User Signal")
@@ -233,10 +248,10 @@ if __name__ == '__main__':
                 statManager.SaveToFile(args.stat_location)
             if args.save:
                 SaveState(suffix = "canceled")
-            if args.slackbot:
-                slackBot.SendError("User Interrupted")
+            """if args.slackbot:
+                slackBot.SendError("User Interrupted")"""
         # End the Training Signal
-        slackBot.SendEndSignal()
+        """slackBot.SendEndSignal()"""
     elif args.mode == "analyze":
         for arg in vars(args):
             if arg in ["bfp_layer_confs", "checkpoints" "trainset", "testset", "classes", "trainloader", "testloader", "bfp_layer_conf",

@@ -35,6 +35,8 @@ def GetDimension(val, dim=4):
             return (1,1,1)
         elif dim == 2:
             return (1,1)
+        elif dim == 1:
+            return (1)
 
 def GetTupleShortString(t):
     s = "("
@@ -53,16 +55,19 @@ class BFPConf():
             di, dw = 4, 4
         elif self.type.lower() == "linear":
             di, dw = 2, 2
+        elif self.type.lower() == "batchnorm2d":
+            print()
+            di, dw = 4, 4 # dw = 4
 
-        # Foward - Weight
+        # Forward - Weight
         self.fw     = dic["fw"]                         if "fw"     in dic.keys() else True
-        self.fw_bit = dic["fw_bit"]                     if "fw_bit" in dic.keys() else 8
+        self.fw_bit = dic["fw_bit"]                     if "fw_bit" in dic.keys() else 2
         self.fw_dim  = GetDimension(dic["fw_dim"],di)   if "fw_dim" in dic.keys() else (16,1,3,3)
 
         # Forward - Input
         self.fi     = dic["fi"]                         if "fi"     in dic.keys() else True
         self.fi_bit = dic["fi_bit"]                     if "fi_bit" in dic.keys() else self.fw_bit
-        self.fi_dim  = GetDimension(dic["fi_dim"],dw)   if "fi_dim" in dic.keys() else (4,1,3,3)
+        self.fi_dim  = GetDimension(dic["fi_dim"],dw)   if "fi_dim" in dic.keys() else (8,1,1,1) #(4,1,3,3)
 
         # Forward - Output
         self.fo     = dic["fo"]                         if "fo"     in dic.keys() else False

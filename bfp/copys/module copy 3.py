@@ -636,248 +636,148 @@ def origin_idx_calculator(idx, B, H, W, num_chunks):
                         ((j*B*H*W//num_chunks+int(idx[i][j]))%(H*W))//H, ((j*B*H*W//num_chunks+int(idx[i][j]))%(H*W))%H])
     return origin_idx
 
-# For quantization
-class SetPrecision(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input, dtype='bfloat16'):
-        ctx.dtype = dtype
-        if dtype == 'fp32':
-            return input.clone().detach()
-        #ctx.save_for_backward(input)
-        return set_precision(input.clone().detach(), dtype=dtype)
-    @staticmethod
-    def backward(ctx, grad_output):
-        #input = ctx.saved_variables
-        dtype = ctx.dtype
-        if dtype == 'fp32':
-            return grad_output, None
-        if '+' in dtype:
-            dtype = 'fp10_163+8'
-        else:
-            dtype = 'fp10_163' # 'bfloat16' #ctx.dtype
-        return set_precision(grad_output.clone().detach(), dtype=dtype), None
-
-class BFPSetPrecision(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input, dtype='bfloat16', bfp_conf=None):
-        ctx.dtype = dtype
-        ctx.bfp_conf = bfp_conf
-        if dtype == 'fp32':
-            return input.clone().detach()
-        ctx.save_for_backward(input)
-        return set_precision(input.clone().detach(), dtype=dtype)
-    @staticmethod
-    def backward(ctx, grad_output):
-        #input = ctx.saved_variables
-        dtype = ctx.dtype
-        bfp_conf = ctx.bfp_conf
-        if dtype == 'fp32':
-            #grad_output = make_groups_tensor(grad_output.clone().detach(), bfp_conf.bio_bit, bfp_conf.bio_dim)
-            return grad_output, None, None
-        dtype = 'bfloat16' # ctx.dtype
-        grad_output = set_precision(grad_output.clone().detach(), dtype=dtype)
-        #grad_output = make_groups_tensor(grad_output.clone().detach(), bfp_conf.bio_bit, bfp_conf.bio_dim)
-        return grad_output, None, None
-
-class MakeGroupsTensor(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input, bfp_conf=None, mode='fw'):
-        ctx.bfp_conf = bfp_conf
-        #ctx.save_for_backward(input)
-        if mode == 'fw':
-            bit = bfp_conf.fw_bit
-            dim = bfp_conf.fw_dim
-        elif mode == 'fi':
-            bit = bfp_conf.fi_bit
-            dim = bfp_conf.fi_dim
-        elif mode == 'fo':
-            bit = bfp_conf.fo_bit
-            dim = bfp_conf.fo_dim
-        elif mode == 'bwg':
-            bit = bfp_conf.bwg_bit
-            dim = bfp_conf.bwg_dim
-        elif mode == 'bio':
-            bit = bfp_conf.bio_bit
-            dim = bfp_conf.bio_dim
-        elif mode == 'big':
-            bit = bfp_conf.big_bit
-            dim = bfp_conf.big_dim
-        return make_groups_tensor(input.clone().detach(), bit, dim)
-        
-    @staticmethod
-    def backward(ctx, grad_output):
-        bfp_conf = ctx.bfp_conf
-        grad_output = make_groups_tensor(grad_output.clone().detach(), bfp_conf.bio_bit, bfp_conf.bio_dim)
-        return grad_output, None, None
-
-class minusmean(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input, mean):
-        return input - mean
-    @staticmethod
-    def backward(ctx, grad_output):
-        dL_davg = (grad_output * -1.0).sum(dim=(0, 2, 3), keepdim=True)
-        return grad_output, dL_davg
-
-class mulgammabeta(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input, gamma, beta):
-        ctx.save_for_backward(input, gamma, beta)
-        output = input*gamma+beta
-        return output
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        input, gamma, beta = ctx.saved_variables
-        dL_dxi = grad_output * gamma
-        dL_dgamma = (grad_output * input).sum(dim=(0, 2, 3), keepdim=True)
-        dL_dbeta = (grad_output).sum(dim=(0, 2, 3), keepdim=True)
-        
-        return dL_dxi, dL_dgamma, dL_dbeta
-
-# Act like wrapper
-class RangeBatchNorm2d_custom_fwd(torch.nn.Module):
-    def __init__(self, num_features, dtype='bfloat16', momentum=0.1, eps=1e-5, num_chunks=8):
+class RangeBatchNorm2d_custom_fwd(nn.Module):
+    def __init__(self, num_features,  dtype='bfloat16', momentum=0.1, num_chunks=8, eps=1e-5):
         super(RangeBatchNorm2d_custom_fwd, self).__init__()
-        self.num_features = num_features
+        self.register_buffer('running_mean', torch.zeros(num_features))
+        self.register_buffer('running_var', torch.zeros(num_features))
+
         self.momentum = momentum
+        self.num_features = num_features
         self.dtype = dtype
         self.num_chunks = num_chunks
         self.weight = nn.Parameter(torch.Tensor(num_features))
         self.beta = nn.Parameter(torch.Tensor(num_features))
         
-        self.register_buffer('running_mean', torch.zeros(num_features))
-        self.register_buffer('running_var', torch.zeros(num_features))
-        self.reset_parameters()
+        
+        self.reset_params()
         self.eps = eps
 
-    def reset_parameters(self):
+    def reset_params(self):
         self.running_mean.zero_()
         self.running_var.fill_(1)
         self.weight.data.uniform_()
         self.beta.data.zero_()
-
-    def _sum(self, input):
-        B, C, H, W = input.shape
-        y = input.transpose(0, 1).contiguous()  # C x B x H x W
-        y = y.view(C, self.num_chunks, B * H * W // self.num_chunks)
-        sum_max = y.max(-1)[0].view(C, -1).sum(-1)
-        sum_min = y.min(-1)[0].view(C, -1).sum(-1)
-        sum = y.view(C, -1).sum(-1)
-        return sum_max, sum_min, sum
-
-    def mmscale(self, sum_max, sum_min, sum, input_shape):
-        B, C, H, W = input_shape
-        n = B * H * W
-        mean_max = sum_max / self.num_chunks
-        mean_min = sum_min / self.num_chunks
-        mean = sum / n
-        scale_fix = 1 / ((2 * math.log(n//self.num_chunks)) ** 0.5)
-        scale = 1 / ((mean_max - mean_min) * scale_fix + self.eps)
-
-        return mean, scale
-
+    
     def forward(self, X):
-        dtype_nacc = self.dtype
-        if '+' in self.dtype:
-            dtype_nacc = self.dtype.split('+')[0]
-        input = SetPrecision.apply(X, dtype_nacc)
-        gamma = self.weight.view(1, self.num_features, 1, 1)
-        gamma = SetPrecision.apply(gamma, dtype_nacc)
-        beta = self.beta.view(1, self.num_features, 1, 1)
-        sum_max, sum_min, sum = self._sum(input)
-        sum_max = SetPrecision.apply(sum_max, self.dtype)
-        sum_min = SetPrecision.apply(sum_min, self.dtype)
-        sum = SetPrecision.apply(sum, self.dtype)
-        mean, scale = self.mmscale(sum_max, sum_min, sum, X.shape)
-        mean = SetPrecision.apply(mean, dtype_nacc)
-        scale = SetPrecision.apply(scale, dtype_nacc)
-        output = minusmean.apply(input, mean.view(1, -1, 1, 1))
-        output *= scale.view(1, scale.size(0), 1, 1)
-        output = SetPrecision.apply(output, dtype_nacc)
-        output = mulgammabeta.apply(output, gamma, beta)
-        output = SetPrecision.apply(output, dtype_nacc)
-        
+        if self.dtype == 'bfloat16' or self.dtype == 'fp16' or self.dtype == 'fp16+4' or self.dtype == 'fp16+8' or self.dtype == 'fp8' or self.dtype == 'fp8+4' or self.dtype == 'fp8+8':
+            input_ = X
+            #input_ = set_precision(X.clone().detach(), self.dtype)
+            gamma = self.weight.view(1, -1, 1, 1)
+            beta = self.beta.view(1, -1, 1, 1)
+            #gamma = set_precision(gamma.clone().detach(), self.dtype)
+            dtype_nacc = self.dtype
+            if '+' in self.dtype:
+                dtype_nacc = self.dtype.split('+')[0]
+            B, C, H, W = input_.shape
+            y = input_.transpose(0, 1).contiguous()  # C x B x H x W
+            y = y.view(C, self.num_chunks, B * H * W // self.num_chunks)
+
+            avg_max = y.max(-1)[0].mean(-1)  # C
+            avg_max = set_precision(avg_max.clone().detach(), dtype_nacc)
+            avg_min = y.min(-1)[0].mean(-1)  # C
+            avg_min = set_precision(avg_min.clone().detach(), dtype_nacc)
+            avg = y.view(C, -1).mean(-1)  # C
+            avg = set_precision(avg.clone().detach(), dtype_nacc)
+            '''
+            sum_max = y.max(-1)[0].sum(-1)
+            #sum_max = set_precision(sum_max.clone().detach(), self.dtype)
+            sum_min = y.min(-1)[0].sum(-1)
+            #sum_min = set_precision(sum_min.clone().detach(), self.dtype)
+
+            avg_max = sum_max / self.num_chunks
+            #avg_max = set_precision(avg_max.clone().detach(), dtype_nacc)
+            avg_min = sum_min / self.num_chunks
+            #avg_min = set_precision(avg_min.clone().detach(), dtype_nacc)
+            sum = y.view(C, -1).sum(-1)
+            #sum = set_precision(sum.clone().detach(), self.dtype)
+            n = y.view(C, -1).size()[1]
+            avg = sum / n
+            #avg = set_precision(avg.clone().detach(), dtype_nacc)
+            '''
+            scale_fix = 1 / ((2 * math.log(y.size(-1))) ** 0.5)
+            scale = 1 / ((avg_max - avg_min) * scale_fix + self.eps)
+            #scale = set_precision(scale.clone().detach(), self.dtype) #.requires_grad_(True)
+
+            avg = avg.view(1, -1, 1, 1)
+            scale = scale.view(1, -1, 1, 1)
+
+            output = (X - avg) * scale
+            #output = set_precision(output.clone().detach(), self.dtype)
+            
+            output = output * gamma + beta
+            #output = set_precision(output.clone().detach().requires_grad_(True), self.dtype)
+
+        else:
+            gamma = self.weight.view(1, self.num_features, 1, 1)
+            beta = self.beta.view(1, self.num_features, 1, 1)
+            B, C, H, W = X.shape
+            y = X.transpose(0, 1).contiguous()  # C x B x H x W
+            y = y.view(C, self.num_chunks, B * H * W // self.num_chunks)
+            avg_max = y.max(-1)[0].mean(-1)  # C
+            avg_min = y.min(-1)[0].mean(-1)  # C
+            avg = y.view(C, -1).mean(-1)  # C
+
+            scale_fix = 1 / ((2 * math.log(y.size(-1))) ** 0.5)
+            scale = 1 / ((avg_max - avg_min) * scale_fix + self.eps)  
+
+            avg = avg.view(1, -1, 1, 1)
+            scale = scale.view(1, -1, 1, 1)
+
+            output = (X - avg) * scale
+            output = output * gamma + beta
+
         return output
+        """
+        input_ = set_precision(X.clone().detach(), self.dtype)
+        gamma = self.weight.view(1, self.num_features, 1, 1)
+        beta = self.bias.view(1, self.num_features, 1, 1)
+        #if self.training:
+        B, C, H, W = input_.shape
+        y = input_.transpose(0, 1).contiguous()  # C x B x H x W
+        y = y.view(C, self.num_chunks, B * H * W // self.num_chunks)
+        mean_max = y.max(-1)[0].mean(-1)  # C
+        mean_min = y.min(-1)[0].mean(-1)  # C
+        mean = y.view(C, -1).mean(-1)  # C
+
+        #mean_max = mean_max.view(1, -1, 1, 1)
+        #mean_min = mean_min.view(1, -1, 1, 1)
+        mean = mean.view(1, -1, 1, 1)
+    
+        scale_fix = 1 / ((2 * math.log(y.size(-1))) ** 0.5)
+        scale = 1 / ((mean_max - mean_min) * scale_fix + self.eps)
+        scale = scale.view(1, -1, 1, 1)
+
+        out = (X - mean) * scale
+        out = out * gamma + beta
+        
+        else:
+        input_ = X
+        gamma = self.weight.view(1, self.num_features, 1, 1)
+        beta = self.bias.view(1, self.num_features, 1, 1)
+        #if self.training:
+        B, C, H, W = input_.shape
+        y = input_.transpose(0, 1).contiguous()  # C x B x H x W
+        y = y.view(C, self.num_chunks, B * H * W // self.num_chunks)
+        #mean_max = y.max(-1)[0].mean(-1)  # C
+        #mean_min = y.min(-1)[0].mean(-1)  # C
+        mean = y.view(C, -1).mean(-1)  # C
+        
+        mean_max = mean_max.view(1, -1, 1, 1)
+        mean_min = mean_min.view(1, -1, 1, 1)
+        mean = mean.view(1, -1, 1, 1)
+
+        scale_fix = 1 / ((2 * math.log(y.size(-1))) ** 0.5)
+        scale = 1 / ((mean_max - mean_min) * scale_fix + self.eps)
+        scale = scale.view(1, -1, 1, 1)
+
+        out = (X - mean) * scale
+        out = out * gamma + beta
+        """    
 
     def extra_repr(self):
         s = ('{num_features}')
         s += ', {dtype}'
-        return s.format(**self.__dict__)
-
-# Act like wrapper
-class BFPRangeBatchNorm2d_custom_fwd(torch.nn.Module):
-    def __init__(self, num_features, dtype='fp8+8', bfp_conf=None, momentum=0.1, eps=1e-5, num_chunks=8):
-        super(BFPRangeBatchNorm2d_custom_fwd, self).__init__()
-        self.num_features = num_features
-        self.momentum = momentum
-        self.dtype = dtype
-        self.bfp_conf = bfp_conf
-        self.num_chunks = num_chunks
-        self.weight = nn.Parameter(torch.Tensor(num_features))
-        self.beta = nn.Parameter(torch.Tensor(num_features))
-        
-        self.register_buffer('running_mean', torch.zeros(num_features))
-        self.register_buffer('running_var', torch.zeros(num_features))
-        self.reset_parameters()
-        self.eps = eps
-
-    def reset_parameters(self):
-        self.running_mean.zero_()
-        self.running_var.fill_(1)
-        self.weight.data.uniform_()
-        self.beta.data.zero_()
-
-    def _sum(self, input):
-        B, C, H, W = input.shape
-        y = input.transpose(0, 1).contiguous()  # C x B x H x W
-        y = y.view(C, self.num_chunks, B * H * W // self.num_chunks)
-        sum_max = y.max(-1)[0].view(C, -1).sum(-1)
-        sum_min = y.min(-1)[0].view(C, -1).sum(-1)
-        sum = y.view(C, -1).sum(-1)
-        return sum_max, sum_min, sum
-
-    def mmscale(self, sum_max, sum_min, sum, input_shape):
-        B, C, H, W = input_shape
-        n = B * H * W
-        mean_max = sum_max / self.num_chunks
-        mean_min = sum_min / self.num_chunks
-        mean = sum / n
-        scale_fix = 1 / ((2 * math.log(n//self.num_chunks)) ** 0.5)
-        scale = 1 / ((mean_max - mean_min) * scale_fix + self.eps)
-
-        return mean, scale
-
-    def forward(self, X):
-        dtype_nacc = self.dtype
-        if '+' in self.dtype:
-            dtype_nacc = self.dtype.split('+')[0]
-        input = SetPrecision.apply(X, dtype_nacc)
-        input = MakeGroupsTensor.apply(input, self.bfp_conf, 'fi')
-        gamma = self.weight.view(1, self.num_features, 1, 1)
-        gamma = SetPrecision.apply(gamma, dtype_nacc)
-        gamma = MakeGroupsTensor.apply(gamma, self.bfp_conf, 'fw')
-        beta = self.beta.view(1, self.num_features, 1, 1)
-        sum_max, sum_min, sum = self._sum(input)
-        sum_max = SetPrecision.apply(sum_max, self.dtype)
-        sum_min = SetPrecision.apply(sum_min, self.dtype)
-        sum = SetPrecision.apply(sum, self.dtype)
-        mean, scale = self.mmscale(sum_max, sum_min, sum, X.shape)
-        mean = SetPrecision.apply(mean, dtype_nacc)
-        scale = SetPrecision.apply(scale, dtype_nacc)
-        output = minusmean.apply(input, mean.view(1, -1, 1, 1))
-        output *= scale.view(1, scale.size(0), 1, 1)
-        output = SetPrecision.apply(output, dtype_nacc)
-        output = mulgammabeta.apply(output, gamma, beta)
-        output = SetPrecision.apply(output, dtype_nacc)
-        output = MakeGroupsTensor.apply(output, self.bfp_conf, 'fo')
-        
-        return output
-
-    def extra_repr(self):
-        s = ('{num_features}')
-        s += ', {dtype}'
-        s += ', bfp_conf=({bfp_conf})'
         return s.format(**self.__dict__)
 
 class RangeBatchNorm2dFunction(torch.autograd.Function):
@@ -1248,9 +1148,9 @@ class BatchNorm2dFunction(torch.autograd.Function):
         var = ctx.var
         eps = ctx.eps
         dtype = ctx.dtype
-        #if dtype != 'fp32':
-        dtype = 'fp16'#'bfloat16'
-        dtype_nacc = 'fp16'#'bfloat16'
+        if dtype != 'fp32':
+            dtype = 'bfloat16'
+            dtype_nacc = 'bfloat16+4'
         
         if dtype == 'bfloat16' or dtype == 'fp16' or dtype == 'fp16+4' or dtype == 'fp16+8' or dtype == 'fp8' or dtype == 'fp8+4' or dtype == 'fp8+8':
             grad_output = set_precision(grad_output.clone().detach(), dtype)

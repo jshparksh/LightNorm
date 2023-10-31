@@ -83,9 +83,9 @@ def LoadCifar100(args):
 import torchvision.datasets as datasets
 
 def LoadImageNet(args):
-
-    traindir = os.path.join(args.dataset_path, 'train')
-    valdir = os.path.join(args.dataset_path, 'val')
+    dataset_path = '/dataset/ImageNet/Classification'
+    traindir = os.path.join(dataset_path, 'train')
+    valdir = os.path.join(dataset_path, 'val')
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
 
