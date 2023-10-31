@@ -9,7 +9,11 @@ from utils.save import SaveModel
 from utils.hook import batchnorm_hook_result
 from train.network import GetNetwork, GetOptimizer, GetScheduler
 from bfp.functions import LoadBFPDictFromFile
+<<<<<<< HEAD
 import wandb
+=======
+from utils.dynamic import DO
+>>>>>>> f8b9006c5864df8a28775e01baa102859ed5816b
 
 def TrainMixed(args, epoch_current):
     running_loss = 0.0
@@ -67,6 +71,7 @@ def Train(args, epoch_current):
     batch_count = 0
     ptc_count = 1
     ptc_target = ptc_count / args.print_train_count
+<<<<<<< HEAD
     
     top1, top5, total = 0, 0, 0
     
@@ -137,7 +142,15 @@ def Train(args, epoch_current):
             pickle.dump(batch_output, bw)
         hook.close()
     """
+=======
+
+    # DO.FlatModel(args.net)
+
+    grad_avg = 0
+    # with torch.autograd.profiler.profile(use_cuda=True) as prof:
+>>>>>>> f8b9006c5864df8a28775e01baa102859ed5816b
     for i, data in enumerate(args.trainloader, 0):
+    
         inputs, labels = data
         
         if args.cuda:
@@ -154,8 +167,24 @@ def Train(args, epoch_current):
         torch.nn.utils.clip_grad_norm_(args.net.parameters(), 5)
 
         running_loss += loss.item()
+<<<<<<< HEAD
         
         # Print the running loss
+=======
+
+        if args.do != "":
+            DO.Update(args.net)
+
+        args.optimizer.step()
+        args.optimizer.zero_grad()
+
+        
+        
+        if args.warmup:
+            if epoch_current < args.warmup_epoch:
+                args.scheduler_warmup.step()
+        # Print and record the running loss
+>>>>>>> f8b9006c5864df8a28775e01baa102859ed5816b
         pF = False
         batch_count += 1
         if args.print_train_batch != 0:
@@ -171,6 +200,7 @@ def Train(args, epoch_current):
                 (epoch_current + 1, args.training_epochs,
                 i + 1, len(args.trainloader),
                 running_loss / batch_count))
+<<<<<<< HEAD
             acc1, acc5 = Accuracy(outputs, labels, topk=(1, 5))
             top1 += acc1[0] * inputs.size(0)
             top5 += acc5[0] * inputs.size(0)
@@ -181,6 +211,16 @@ def Train(args, epoch_current):
                 (top1/total).cpu().item()))
             running_loss = 0.0
             batch_count = 0
+=======
+
+            args.writer.add_scalar('training loss',
+                    running_loss / batch_count,
+                    epoch_current * len(args.trainloader) + i)
+            # statManager.AddData("training loss", running_loss / batch_count)
+            running_loss = 0.0
+            batch_count = 0
+    
+>>>>>>> f8b9006c5864df8a28775e01baa102859ed5816b
     
     Log.Print('[%d/%d], TrainAcc(t1):%7.3f' % (epoch_current+1, args.training_epochs, (top1/total).cpu().item()))    
     
@@ -228,11 +268,26 @@ def Evaluate(args, mode = "test"):
             total += images.size(0)
     return (top1/total).cpu().item(), (top3/total).cpu().item(), (top5/total).cpu().item()
 
+
 # Train the network and evaluate
 def TrainNetwork(args):
     Log.Print("========== Starting Training ==========")
+<<<<<<< HEAD
     args.scaler = torch.cuda.amp.GradScaler() # FP16 Mixed Precision
+=======
+    slackBot.ResetStartTime()
+
+    if args.do != "":
+        DO.Initialize(args.net, len(args.trainloader), args.save_prefix, args.do)
+        DO.CoLoR = args.do_color
+
+    # args.scaler = torch.cuda.amp.GradScaler() # FP16 Mixed Precision
+
+>>>>>>> f8b9006c5864df8a28775e01baa102859ed5816b
     for epoch_current in range(args.start_epoch, args.training_epochs):
+
+        
+
         # Change and transfer model
         """if epoch_current != args.start_epoch and str(epoch_current) in args.bfp_layer_conf_dict:
             Log.Print("Changing Model bfp config to: %s"%args.bfp_layer_conf_dict[str(epoch_current)], elapsed=False, current=False)
@@ -246,16 +301,25 @@ def TrainNetwork(args):
             args.scheduler = GetScheduler(args, str(epoch_current))
             if args.cuda:
                 args.net.to('cuda')
+<<<<<<< HEAD
         """
+=======
+        
+
+>>>>>>> f8b9006c5864df8a28775e01baa102859ed5816b
         # Train the net
         #wandb.watch(args.net, log="all", log_freq=10)
         Train(args, epoch_current)
         # Evaluate the net
         t1, t3, t5 = Evaluate(args)
         
-        statManager.AddData("top1test", t1)
-        statManager.AddData("top3test", t3)
-        statManager.AddData("top5test", t5)
+        args.writer.add_scalar('top1 accuracy', t1, epoch_current)
+        # args.writer.add_scalar('top3 accuracy', t3, epoch_current)
+        # args.writer.add_scalar('top5 accuracy', t5, epoch_current)
+
+        # statManager.AddData("top1test", t1)
+        # statManager.AddData("top3test", t3)
+        # statManager.AddData("top5test", t5)
         Log.Print('[%d/%d], TestAcc(t1):%7.3f, lr:%f' % (epoch_current+1, args.training_epochs, t1, args.optimizer.param_groups[0]['lr']))
 
         if args.scheduler != None:
@@ -266,11 +330,32 @@ def TrainNetwork(args):
             if args.save_interval != 0 and (epoch_current+1)%args.save_interval == 0:
                 SaveModel(args, "%03d"%(epoch_current+1))
 
+<<<<<<< HEAD
     Log.Print("========== Finished Training ==========")
         
     if args.stat:
         Log.Print("Saving stat object file...")
         statManager.SaveToFile(args.stat_location)
+=======
+        # Send progress to printing expected time
+        if epoch_current == args.start_epoch:
+            slackBot.SendProgress(float(epoch_current+1)/args.training_epochs, length=0)
+
+        # Calculate the zse of the layers and replace model if needed
+
+        # Optional Progress Sending        
+        # if (epoch_current+1) % 5 == 0:
+        #     slackBot.SendProgress(float(epoch_current+1)/args.training_epochs)
+
+    Log.Print("========== Finished Training ==========")
+    
+    # Sending remaining dumps
+    slackBot.SendDump()
+    
+    # if args.stat:
+    #     Log.Print("Saving stat object file...")
+        # statManager.SaveToFile(args.stat_location)
+>>>>>>> f8b9006c5864df8a28775e01baa102859ed5816b
 
     if args.save:
         SaveModel(args, "finish")

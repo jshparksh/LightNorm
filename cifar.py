@@ -7,9 +7,9 @@ import torch.nn as nn
 from utils.logger import Log
 from utils.slackBot import slackBot
 from utils.generateConfig import GenerateConfig
-from utils.tensorAnalyze import TensorAnalyze
 from utils.statManager import statManager
-from utils.functions import str2bool
+from utils.functions import str2bool, WarmUpLR
+from torch.utils.tensorboard import SummaryWriter
 
 from train.dataset import LoadDataset
 from train.network import GetNetwork, GetOptimizer, GetScheduler
@@ -22,9 +22,15 @@ import os
 import json
 import argparse
 from datetime import datetime
+<<<<<<< HEAD:main.py
 import wandb
 
+=======
+import string
+import random
+>>>>>>> f8b9006c5864df8a28775e01baa102859ed5816b:cifar.py
 args = None
+
 
 
 def SetArgsFromConf(args, attr_name):
@@ -48,22 +54,33 @@ def ArgumentParse():
 
     # ----------------- configurable by train config file -------------------
     # tag:Save
-    parser.add_argument("--save-name", type=str, default = str(datetime.now())[:-7].replace("-","").replace(":","").replace(" ","_"),
+    parser.add_argument("--run-dir", type=str, default = "",
         help = "Name of the saved log file, stat object, save checkpoint")
     parser.add_argument("--pickle-path", type=str, default = "./_pickles",
         help = "Set location to save pickle file")
     parser.add_argument("--log", type=str2bool, default = True,
         help = "Set true to save log file")
+<<<<<<< HEAD:main.py
     """parser.add_argument("--slackbot", type=str2bool, default = True,
         help = "Set true to send message to slackbot")"""
     parser.add_argument("--stat", type=str2bool, default = False,
         help = "Record to stat object?")
+=======
+    # parser.add_argument("--stat", type=str2bool, default = False,
+    #     help = "Record to stat object?") # To tensorboard
+>>>>>>> f8b9006c5864df8a28775e01baa102859ed5816b:cifar.py
     parser.add_argument("--save", type=str2bool, default = False,
         help = "Set true to save checkpoints")
     parser.add_argument("--save-interval", type=int, default = 0,
         help = "Checkpoint save interval. 0:only last, rest:interval")
+<<<<<<< HEAD:main.py
     parser.add_argument("--dtype", type=str, default="FP32",
         help = "Data precision to uss [FP32, FP16, FP16+4, FP16+8, FP8, FP8+4, FP8+8, BFLOAT16")
+=======
+
+    parser.add_argument("--slackbot", type=str2bool, default = False,
+        help = "Set true to send message to slackbot")
+>>>>>>> f8b9006c5864df8a28775e01baa102859ed5816b:cifar.py
     
     
     # tag:Dataset
@@ -97,8 +114,6 @@ def ArgumentParse():
         help = "Optimizer momentum")
     parser.add_argument("--optim-weight-decay", type=float, default = 5e-4,
         help = "Optimizer weight decay")
-    parser.add_argument("--loss-boost", type=float, default = 1.0,
-        help = "Loss boost to each layer [NOT IMPLEMENTED]")
 
     # tag:Print
     parser.add_argument("--print-train-batch", type=int, default = 0,
@@ -111,13 +126,11 @@ def ArgumentParse():
     # Tag:zseAnalyze
     parser.add_argument("--save-file", type=str, default = "",
         help = "Saved checkpoint of the model")
-    parser.add_argument("--zse-bfp", type=str2bool, default = False,
-        help = "[zse-analyze] If saved file is BFP network, set this to true")
-    parser.add_argument("--zse-graph-mode", type=str, default="percentage",
-        help = "[zse-analyze] Choose graph mode [none, percentage, count]")
-    parser.add_argument("--zse-print-mode", type=str, default = "sum",
-        help = "[zse-analyze] Choose print mode [none, sum, format, all]")
 
+    parser.add_argument('--do', default='', type=str,
+                    help='activate to dynamic optimization')
+    parser.add_argument('--do-color', type=str2bool, default = True,
+                    help='MaKe CoLoRfUl')
     # Parse arguments
     args = parser.parse_args()
 
@@ -132,28 +145,47 @@ def ArgumentParse():
             args.train_config = json.load(f)
 
     # tag:Save
-    SetArgsFromConf(args, "save-name")
+    SetArgsFromConf(args, "run-dir")
     SetArgsFromConf(args, "log")
     SetArgsFromConf(args, "stat")
     SetArgsFromConf(args, "save")
     """SetArgsFromConf(args, "slackbot")"""
     SetArgsFromConf(args, "save-interval")
 
+    if not os.path.exists("./runs"):
+        os.makedirs("./runs")
+
+    if args.run_dir == "":
+        
+        if args.train_config != None:
+            args.run_dir = "[TC]" + args.train_config_file
+        else:
+            args.run_dir = args.dataset + "_" + args.model
+            if args.bfp_layer_conf_file != "":
+                s = args.bfp_layer_conf_file
+                args.run_dir += "_" + s[s.index("_")+1:]
+            if args.do != "":
+                args.run_dir += "_" + args.do.replace("/","-")
+        # args.run_dir += "_" + str(datetime.now())[4:-7].replace("-","").replace(":","").replace(" ","_")
+        # Random ID...?
+        args.run_dir += "_" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
     # Additional handlers
-    if not os.path.exists("./_logs"):
-        os.makedirs("./_logs")
-    if not os.path.exists("./_saves"):
-        os.makedirs("./_saves")
-    if not os.path.exists("./_stats"):
-        os.makedirs("./_stats")
-    args.log_location = "./_logs/" + args.save_name + ".log"
-    args.save_prefix = "./_saves/" + args.save_name
-    args.stat_location = "./_stats/" + args.save_name + ".stat"
+    
+    args.writer = SummaryWriter('runs/'+args.run_dir)
+
+    args.log_location = "./runs/" + args.run_dir + "/log.txt"
+    args.save_prefix = "./runs/" + args.run_dir
+    # args.stat_location = "./_stats/" + args.save_name + ".stat"
     # Set the log file
     Log.SetLogFile(True, args.log_location) if args.log else Log.SetLogFile(False)
     # args.stat = statManager() if args.stat else None
+<<<<<<< HEAD:main.py
     """slackBot.Enable() if args.slackbot else slackBot.Disable()
     slackBot.SetProcessInfo(args.save_name)"""
+=======
+    slackBot.Enable() if args.slackbot else slackBot.Disable()
+    slackBot.SetProcessInfo(args.run_dir)
+>>>>>>> f8b9006c5864df8a28775e01baa102859ed5816b:cifar.py
     
     # tag:Dataset
     SetArgsFromConf(args, "dataset")
@@ -205,6 +237,13 @@ def ArgumentParse():
     args.optimizer = GetOptimizer(args, args.start_epoch)
     args.scheduler = GetScheduler(args, args.start_epoch)
     
+    # Overriding
+    # args.scheduler = optim.lr_scheduler.MultiStepLR(args.optimizer, milestones=[60, 120, 160], gamma=0.2)
+    args.warmup = False
+    if args.warmup:
+        args.warmup_epoch = 5
+        args.scheduler_warmup = WarmUpLR(args.optimizer, 391*args.warmup_epoch)
+    
     # tag:Print
     SetArgsFromConf(args, "print-train-batch")
     SetArgsFromConf(args, "print-train-count")
@@ -213,12 +252,22 @@ def ArgumentParse():
         args.net.to('cuda')
     # TODO : Support Distributed DataParallel
 
+<<<<<<< HEAD:main.py
     # Write Tensorboard model
     #dataiter = iter(args.trainloader)
     #images, _ = dataiter.next()
     #args.writer.add_graph(args.net, images.cuda())
     #args.writer.close()
     
+=======
+
+    # Write Tensorboard model
+    dataiter = iter(args.trainloader)
+    images, _ = dataiter.next()
+    args.writer.add_graph(args.net, images.cuda())
+    args.writer.close()
+
+>>>>>>> f8b9006c5864df8a28775e01baa102859ed5816b:cifar.py
     return args
 
 if __name__ == '__main__':
@@ -228,14 +277,26 @@ if __name__ == '__main__':
     Log.Print("Program executed on {} mode.".format(args.mode), current=False, elapsed=False)
     if args.mode == "train":
         # Network training mode
+        s = ""
         for arg in vars(args):
             if arg in ["bfp_layer_confs", "bfp_layer_conf", "checkpoints" "trainset", "testset", "classes", "trainloader", "testloader"] or "zse" in arg:
                 continue
             Log.Print(str(arg) + " : " + str(getattr(args, arg)), current=False, elapsed=False)
+            s += str(arg) + " : " + str(getattr(args, arg)) + "\n\n"
+        args.writer.add_text("config", s)
         # Setup Slackbot
+<<<<<<< HEAD:main.py
         """text_file = open("./slackbot.token", "r")
         data = text_file.read()
         text_file.close()
+=======
+        try:
+            text_file = open("./slackbot.token", "r")
+            data = text_file.read()
+            text_file.close()
+        except:
+            data = ""
+>>>>>>> f8b9006c5864df8a28775e01baa102859ed5816b:cifar.py
         slackBot.SetToken(data)
         slackBot.SendStartSignal()"""
         try:
@@ -244,6 +305,7 @@ if __name__ == '__main__':
             TrainNetwork(args)
         except KeyboardInterrupt:
             Log.Print("Quit from User Signal")
+<<<<<<< HEAD:main.py
             if args.stat:
                 statManager.SaveToFile(args.stat_location)
             if args.save:
@@ -260,6 +322,16 @@ if __name__ == '__main__':
             Log.Print(str(arg) + " : " + str(getattr(args, arg)), current=False, elapsed=False)
         # zse analyze mode
         TensorAnalyze(args)
+=======
+            # if args.stat:
+            #     statManager.SaveToFile(args.stat_location)
+            # if args.save:
+            #     SaveState(suffix = "canceled")
+            if args.slackbot:
+                slackBot.SendError("User Interrupted")
+        # End the Training Signal
+        slackBot.SendEndSignal()
+>>>>>>> f8b9006c5864df8a28775e01baa102859ed5816b:cifar.py
     elif args.mode == "generate-config":
         # Generating config mode
         GenerateConfig(args)
